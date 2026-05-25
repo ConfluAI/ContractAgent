@@ -1,0 +1,196 @@
+{
+  "labor_contract_law_to_regulation": {
+    "47": [
+      {
+        "section_id": "第六条",
+        "article_num": 6,
+        "chapter": "第二章 劳动合同的订立"
+      },
+      {
+        "section_id": "第二十二条",
+        "article_num": 22,
+        "chapter": "第三章 劳动合同的解除和终止"
+      },
+      {
+        "section_id": "第二十三条",
+        "article_num": 23,
+        "chapter": "第三章 劳动合同的解除和终止"
+      },
+      {
+        "section_id": "第二十七条",
+        "article_num": 27,
+        "chapter": "第三章 劳动合同的解除和终止"
+      },
+      {
+        "section_id": "第三十一条",
+        "article_num": 31,
+        "chapter": "第四章 劳务派遣特别规定"
+      }
+    ],
+    "82": [
+      {
+        "section_id": "第六条",
+        "article_num": 6,
+        "chapter": "第二章 劳动合同的订立"
+      },
+      {
+        "section_id": "第七条",
+        "article_num": 7,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "7": [
+      {
+        "section_id": "第八条",
+        "article_num": 8,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "14": [
+      {
+        "section_id": "第九条",
+        "article_num": 9,
+        "chapter": "第二章 劳动合同的订立"
+      },
+      {
+        "section_id": "第十一条",
+        "article_num": 11,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "18": [
+      {
+        "section_id": "第十一条",
+        "article_num": 11,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "44": [
+      {
+        "section_id": "第十三条",
+        "article_num": 13,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "22": [
+      {
+        "section_id": "第十六条",
+        "article_num": 16,
+        "chapter": "第二章 劳动合同的订立"
+      },
+      {
+        "section_id": "第十七条",
+        "article_num": 17,
+        "chapter": "第二章 劳动合同的订立"
+      }
+    ],
+    "40": [
+      {
+        "section_id": "第二十条",
+        "article_num": 20,
+        "chapter": "第三章 劳动合同的解除和终止"
+      }
+    ],
+    "87": [
+      {
+        "section_id": "第二十五条",
+        "article_num": 25,
+        "chapter": "第三章 劳动合同的解除和终止"
+      }
+    ],
+    "38": [
+      {
+        "section_id": "第二十六条",
+        "article_num": 26,
+        "chapter": "第三章 劳动合同的解除和终止"
+      }
+    ],
+    "67": [
+      {
+        "section_id": "第二十八条",
+        "article_num": 28,
+        "chapter": "第四章 劳务派遣特别规定"
+      }
+    ],
+    "62": [
+      {
+        "section_id": "第二十九条",
+        "article_num": 29,
+        "chapter": "第四章 劳务派遣特别规定"
+      }
+    ],
+    "46": [
+      {
+        "section_id": "第三十一条",
+        "article_num": 31,
+        "chapter": "第四章 劳务派遣特别规定"
+      }
+    ],
+    "48": [
+      {
+        "section_id": "第三十二条",
+        "article_num": 32,
+        "chapter": "第四章 劳务派遣特别规定"
+      }
+    ]
+  },
+  "regulation_to_labor_contract_law": {
+    "6": [
+      47,
+      82
+    ],
+    "7": [
+      82
+    ],
+    "8": [
+      7
+    ],
+    "9": [
+      14
+    ],
+    "11": [
+      14,
+      18
+    ],
+    "13": [
+      44
+    ],
+    "16": [
+      22
+    ],
+    "17": [
+      22
+    ],
+    "20": [
+      40
+    ],
+    "22": [
+      47
+    ],
+    "23": [
+      47
+    ],
+    "25": [
+      87
+    ],
+    "26": [
+      38
+    ],
+    "27": [
+      47
+    ],
+    "28": [
+      67
+    ],
+    "29": [
+      62
+    ],
+    "31": [
+      46,
+      47
+    ],
+    "32": [
+      48
+    ]
+  }
+}
