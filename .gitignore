@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/*.docx
+data/chroma_civil_code/
