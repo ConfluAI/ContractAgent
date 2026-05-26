@@ -150,6 +150,3 @@ ContractAgent/
 | 劳动合同法实施条例 | 35 | 行政法规 |
 | **总计** | **856** | |
 
-## 详细文档
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — 数据管线、向量存储、检索管线、LangGraph 工作流、法律体系关系全图
