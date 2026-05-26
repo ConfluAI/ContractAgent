@@ -9,16 +9,16 @@ from pathlib import Path
 
 from langchain_chroma import Chroma
 
-from utils import (
+from retrieval.loaders import (
     load_chunks,
     load_judicial_interpretation,
     load_labor_law,
     load_labor_contract_law,
     load_labor_contract_regulation,
 )
-from utils.retrieval import SiliconFlowEmbeddings
+from retrieval.embeddings import SiliconFlowEmbeddings
 
-PERSIST_DIR = Path(__file__).resolve().parent / "data" / "chroma_civil_code"
+PERSIST_DIR = Path(__file__).resolve().parent.parent / "data" / "chroma_civil_code"
 
 
 def main(clear: bool = False) -> None:

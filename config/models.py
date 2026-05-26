@@ -5,6 +5,7 @@
 """
 
 import os
+from typing import Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -21,7 +22,7 @@ MODELS = {
 
 # ── 客户端（单例）─────────────────────────────────────────────────────
 
-_client: OpenAI | None = None
+_client: Optional[OpenAI] = None
 
 
 def get_client() -> OpenAI:

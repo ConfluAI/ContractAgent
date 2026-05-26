@@ -9,5 +9,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "langchain-core>=0.3.0",
     "langchain-chroma>=0.2.0",
+    "langgraph>=0.2.0",
+    "pypdf>=4.0.0",
 ]
 

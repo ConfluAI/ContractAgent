@@ -7,6 +7,8 @@
     后续检索司法解释时可直接关联到民法典原文条文。
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sys

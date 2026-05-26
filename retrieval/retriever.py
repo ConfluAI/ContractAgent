@@ -10,6 +10,8 @@
   4. 按优先级降序组装输出
 """
 
+from __future__ import annotations
+
 import json
 import re
 from pathlib import Path
@@ -19,10 +21,10 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from config.models import get_client, model_name
-from utils import load_bridge, load_labor_contract_bridge
-from utils.retrieval import SiliconFlowEmbeddings
+from retrieval.loaders import load_bridge, load_labor_contract_bridge
+from retrieval.embeddings import SiliconFlowEmbeddings
 
-PERSIST_DIR = str(Path(__file__).resolve().parent / "data" / "chroma_civil_code")
+PERSIST_DIR = str(Path(__file__).resolve().parent.parent / "data" / "chroma_civil_code")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 分支规格（配置驱动 — 加新领域只改这里）

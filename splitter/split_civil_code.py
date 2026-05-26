@@ -8,6 +8,8 @@ Output JSONL: {page_content, metadata}
 page_content embeds hierarchical context as a readable prefix.
 """
 
+from __future__ import annotations
+
 import re
 import json
 import sys
