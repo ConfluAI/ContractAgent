@@ -4,3 +4,7 @@ __pycache__/
 .env
 data/*.docx
 data/chroma_civil_code/
+uploads/*.docx
+uploads/*.pdf
+frontend/node_modules/
+frontend/dist/
