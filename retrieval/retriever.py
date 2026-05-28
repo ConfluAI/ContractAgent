@@ -5,15 +5,17 @@
 
 检索流程:
   1. 调用方指定 branches=["civil", "labor"]
-  2. 每分支：bridged pairs(向量+桥接) + standalone(独立)
-  3. 各分支独立 LLM Rerank
-  4. 按优先级降序组装输出
+  2. 各分支间并行（ThreadPoolExecutor）
+  3. 分支内部多路向量检索并行
+  4. 桥接补全 → 向量预截断(Top N) → LLM Rerank
+  5. QA 模式可跳过 Rerank，向量排序直接输出
 """
 
 from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ PERSIST_DIR = str(Path(__file__).resolve().parent.parent / "data" / "chroma_civi
 
 BRANCH_SPEC: dict[str, dict[str, Any]] = {
     "civil": {
-        "priority": 2,                    # 1=最高优，数字越小越靠前
+        "priority": 2,
         "label": "合同通用规范",
         "description": "民法典+合同编解释",
         "bridged": [{
@@ -45,6 +47,7 @@ BRANCH_SPEC: dict[str, dict[str, Any]] = {
             "secondary_to_primary": "interpretation_to_civil",
         }],
         "standalone": [],
+        "max_rerank_blocks": 5,
     },
     "labor": {
         "priority": 1,
@@ -53,19 +56,20 @@ BRANCH_SPEC: dict[str, dict[str, Any]] = {
         "bridged": [{
             "primary": "labor_contract_law",
             "secondary": "labor_contract_regulation",
-            "primary_k": 3,
-            "secondary_k": 3,
+            "primary_k": 2,   # 从 3 降到 2，减少桥接膨胀
+            "secondary_k": 2,
             "bridge_loader": lambda: load_labor_contract_bridge(),
             "primary_to_secondary": "labor_contract_law_to_regulation",
             "secondary_to_primary": "regulation_to_labor_contract_law",
         }],
         "standalone": [
-            {"collection": "labor_law", "k": 2},
+            {"collection": "labor_law", "k": 1},  # 从 2 降到 1
         ],
+        "max_rerank_blocks": 5,
     },
 }
 
-# 从 spec 中提取所有 collection 名称
+
 def _all_collections() -> list[str]:
     cols = set()
     for spec in BRANCH_SPEC.values():
@@ -78,7 +82,6 @@ def _all_collections() -> list[str]:
 
 
 def _bridged_pair_k_multiplier(active_branches: list[str]) -> int:
-    """民事分支独立使用时放大 k 值（它是唯一依据）。"""
     return 2 if active_branches == ["civil"] else 1
 
 
@@ -101,48 +104,32 @@ def _fmt_source(meta: dict) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 知识块组装
+# 知识块组装 + 标签
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _assemble_block(pair: dict, idx: int) -> str:
     civil = pair["civil"]
     interp = pair["interp"]
-    tags = pair.get("tags", [])
 
-    lines = [f"【知识单元 {chr(65 + idx)}】"]
+    parts = [f"【单元 {chr(65 + idx)}】"]
 
     if civil:
-        lines.append("┌─ 出处 ─────────────────────────────────────────────")
-        lines.append(f"│ {_fmt_source(civil.metadata)}")
-        lines.append(f"│ law_rank: {civil.metadata.get('law_rank_desc', '')}")
-        lines.append("├─ 原文 ─────────────────────────────────────────────")
         cid = civil.metadata.get("section_id", "")
         text = civil.page_content
         pos = text.find(cid) if cid else -1
-        if pos >= 0:
-            text = text[pos:]
-        lines.append(f"│ {text[:500]}")
+        body = text[pos:] if pos >= 0 else text
+        parts.append(f"[{_fmt_source(civil.metadata)}] {body[:400]}")
     else:
-        lines.append("├─ 原文 ─────────────────────────────────────────────")
-        lines.append("│ （无匹配上位法条文）")
+        parts.append("（无上位法配对）")
 
     if interp:
-        lines.append("├─ 下位法 ───────────────────────────────────────────")
-        lines.append(f"│ {_fmt_source(interp.metadata)}")
-        lines.append(f"│ law_rank: {interp.metadata.get('law_rank_desc', '')}")
         iid = interp.metadata.get("section_id", "")
         itext = interp.page_content
         pos = itext.find(iid) if iid else -1
-        if pos >= 0:
-            itext = itext[pos:]
-        lines.append(f"│ {itext[:500]}")
+        body = itext[pos:] if pos >= 0 else itext
+        parts.append(f"[{_fmt_source(interp.metadata)}] {body[:400]}")
 
-    if tags:
-        lines.append("├─ 关联标签 ─────────────────────────────────────────")
-        lines.append(f"│ {' / '.join(tags)}")
-
-    lines.append("└────────────────────────────────────────────────────")
-    return "\n".join(lines)
+    return "\n".join(parts)
 
 
 def _derive_tags(civil: Document | None, interp: Document | None) -> list[str]:
@@ -209,12 +196,14 @@ def _bridge_completion(
                     "civil": law_doc,
                     "interp": sub_by_num.get(snum),
                     "tags": _derive_tags(law_doc, sub_by_num.get(snum)),
+                    "_source": "bridged",
                 })
         else:
             pairs.append({
                 "civil": law_doc,
                 "interp": None,
                 "tags": _derive_tags(law_doc, None),
+                "_source": "direct",
             })
 
     used_snums = {p["interp"].metadata["article_num"] for p in pairs if p["interp"]}
@@ -224,6 +213,7 @@ def _bridge_completion(
                 "civil": None,
                 "interp": sub_doc,
                 "tags": _derive_tags(None, sub_doc),
+                "_source": "orphan",
             })
 
     return pairs
@@ -283,15 +273,11 @@ RERANK_PROMPT = """你是一位资深法官助理。请从以下法条-解释知
 - 特别注意：独立条文（如劳动法、劳动合同法）与有配对的条文平等竞争，
   不能因为缺少解释而系统性排在后面
 
-输出 JSON 数组，按 total 降序排列，不要输出其他内容：
+输出 JSON 数组，按 total 降序排列。只输出 unit/total/verdict，不要输出子分和理由：
 [
   {{
     "unit": "A",
-    "applicability": 5,
-    "completeness": 4,
-    "complementarity": 1,
     "total": 10,
-    "reason": "直接规定违约金调整标准，但无解释补充审查细节",
     "verdict": "RELEVANT"
   }}
 ]
@@ -322,6 +308,9 @@ def _llm_rerank(query: str, blocks: list[str]) -> list[dict]:
     )
 
     raw = resp.choices[0].message.content.strip()
+    # 去掉 ```json ... ``` 包裹
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
         raise ValueError(f"LLM 未返回 JSON 数组: {raw[:200]}")
@@ -338,6 +327,28 @@ def _merge_scores(
             merged.append({**s, "pair": pairs[idx], "block_text": blocks[idx]})
     merged.sort(key=lambda x: -x["total"])
     return merged
+
+
+def _vector_sort(pairs: list[dict]) -> list[dict]:
+    """向量相似度简易排序：直接命中 > 桥接补全 > 孤儿。无 LLM 调用。"""
+    order = {"direct": 0, "bridged": 1, "orphan": 2}
+    scored = []
+    for p in pairs:
+        source = p.pop("_source", "bridged")
+        rank = order.get(source, 1)
+        # 直接命中给高分，桥接次之
+        applicability = 4 if source == "direct" else 3 if source == "bridged" else 2
+        scored.append({
+            "applicability": applicability,
+            "completeness": 3,
+            "complementarity": 3 if p["interp"] else 1,
+            "total": applicability + 3 + (3 if p["interp"] else 1),
+            "reason": "向量相似度排序（QA 模式）",
+            "verdict": "RELEVANT" if applicability >= 3 else "IRRELEVANT",
+            "pair": p,
+        })
+    scored.sort(key=lambda x: -x["total"])
+    return scored
 
 
 def _build_cache(store: Chroma) -> dict[int, Document]:
@@ -358,14 +369,13 @@ class ContractRetriever:
 
     用法:
       r = ContractRetriever()
-      result = r.search("公司拖欠工资...", branches=["labor", "civil"])
-      result = r.search("买方拒付货款...", branches=["civil"])
+      r.search_branch("civil", query)           # 单分支
+      r.search(query, branches=["civil", "labor"])  # 多分支并行
     """
 
     def __init__(self):
         self._embeddings = SiliconFlowEmbeddings()
 
-        # ── 从 spec 自动初始化 stores ──
         self._stores: dict[str, Chroma] = {}
         for col_name in _all_collections():
             self._stores[col_name] = Chroma(
@@ -374,7 +384,6 @@ class ContractRetriever:
                 embedding_function=self._embeddings,
             )
 
-        # ── 自动初始化桥接（de-dup by id）──
         self._bridges: dict[int, dict] = {}
         for spec in BRANCH_SPEC.values():
             for bp in spec.get("bridged", []):
@@ -382,27 +391,62 @@ class ContractRetriever:
                 if bridge_id not in self._bridges:
                     self._bridges[bridge_id] = bp["bridge_loader"]()
 
-        # ── 自动初始化缓存 ──
         self._cache: dict[str, dict[int, Document]] = {}
         for col_name in _all_collections():
             self._cache[col_name] = _build_cache(self._stores[col_name])
 
     # ── 单分支检索 ────────────────────────────────────────────────────
 
-    def _search_branch(
-        self, branch_name: str, query: str, k_multiplier: int = 1
+    def search_branch(
+        self,
+        branch_name: str,
+        query: str,
+        k_multiplier: int = 1,
+        rerank: bool = True,
     ) -> list[dict]:
-        """根据 spec 执行单个分支的完整检索管线。"""
+        """执行单个分支的完整检索管线。
+
+        Args:
+          branch_name: 分支名 ("civil" / "labor" / ...)
+          query: 用户问题
+          k_multiplier: 向量召回放大倍数
+          rerank: True=LLM Rerank, False=向量排序（QA 模式，快）
+        """
         spec = BRANCH_SPEC[branch_name]
+
+        # ── 第 1 步：多路向量检索并行 ──
+        search_tasks: dict[str, list[Document]] = {}
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures: dict[Any, str] = {}
+
+            for bp in spec.get("bridged", []):
+                pk = bp["primary_k"] * k_multiplier
+                sk = bp["secondary_k"] * k_multiplier
+                key_pri = f"pri:{bp['primary']}"
+                key_sec = f"sec:{bp['secondary']}"
+                futures[pool.submit(
+                    self._stores[bp["primary"]].similarity_search, query, k=pk
+                )] = key_pri
+                futures[pool.submit(
+                    self._stores[bp["secondary"]].similarity_search, query, k=sk
+                )] = key_sec
+
+            for sa in spec.get("standalone", []):
+                key_sa = f"sa:{sa['collection']}"
+                futures[pool.submit(
+                    self._stores[sa["collection"]].similarity_search, query, k=sa["k"]
+                )] = key_sa
+
+            for fut in as_completed(futures):
+                search_tasks[futures[fut]] = fut.result()
+
+        # ── 第 2 步：桥接补全 ──
         all_pairs: list[dict] = []
-
-        # 桥接对
         for bp in spec.get("bridged", []):
-            primary_k = bp["primary_k"] * k_multiplier
-            secondary_k = bp["secondary_k"] * k_multiplier
-            pri_hits = self._stores[bp["primary"]].similarity_search(query, k=primary_k)
-            sec_hits = self._stores[bp["secondary"]].similarity_search(query, k=secondary_k)
-
+            pri_key = f"pri:{bp['primary']}"
+            sec_key = f"sec:{bp['secondary']}"
+            pri_hits = search_tasks.get(pri_key, [])
+            sec_hits = search_tasks.get(sec_key, [])
             bridge = self._bridges[id(bp["bridge_loader"])]
             pairs = _bridge_completion(
                 pri_hits, sec_hits,
@@ -414,39 +458,57 @@ class ContractRetriever:
             )
             all_pairs.extend(pairs)
 
-        # 独立库
         for sa in spec.get("standalone", []):
-            hits = self._stores[sa["collection"]].similarity_search(query, k=sa["k"])
-            for doc in hits:
+            for doc in search_tasks.get(f"sa:{sa['collection']}", []):
                 all_pairs.append({
                     "civil": doc,
                     "interp": None,
                     "tags": _derive_tags(doc, None),
+                    "_source": "direct",
                 })
 
         all_pairs = _dedup_pairs(all_pairs)
-        blocks = [_assemble_block(p, i) for i, p in enumerate(all_pairs)]
-        scores = _llm_rerank(query, blocks)
-        return _merge_scores(scores, all_pairs, blocks)
 
-    # ── 主入口 ────────────────────────────────────────────────────────
+        # ── 第 3 步：预截断（减少送给 LLM 的块数）──
+        max_blocks = spec.get("max_rerank_blocks", 6)
+        if len(all_pairs) > max_blocks:
+            # 直接命中 > 桥接补全 > 孤儿
+            order = {"direct": 0, "bridged": 1, "orphan": 2}
+            all_pairs.sort(key=lambda p: order.get(p.get("_source", "bridged"), 1))
+            all_pairs = all_pairs[:max_blocks]
+
+        # ── 第 4 步：排序（LLM Rerank 或 向量排序）──
+        blocks = [_assemble_block(p, i) for i, p in enumerate(all_pairs)]
+        # 清理 _source（不给 LLM 看到内部标记）
+        for p in all_pairs:
+            p.pop("_source", None)
+
+        if rerank:
+            scores = _llm_rerank(query, blocks)
+            return _merge_scores(scores, all_pairs, blocks)
+        else:
+            scored = _vector_sort(all_pairs)
+            for i, s in enumerate(scored):
+                if i < len(blocks):
+                    s["block_text"] = blocks[i]
+            return scored
+
+    # ── 多分支并行入口 ────────────────────────────────────────────────
 
     def search(
         self,
         query: str,
         branches: list[str] | None = None,
         top_k: dict[str, int] | None = None,
+        rerank: bool = True,
     ) -> dict:
-        """执行多分支检索，返回分区组装结果。
+        """多分支并行检索。
 
         Args:
           query: 用户问题或合同片段
-          branches: 激活的分支列表，默认 ["civil"]。
-                    例: ["civil"] / ["civil", "labor"]
-          top_k: 分支名 → 保留条数，默认 {"civil": 3, "labor": 5}
-
-        Returns:
-          { "<branch_name>": [...], "activated_branches": [...], "assembled_text": str }
+          branches: 激活的分支列表，默认 ["civil"]
+          top_k: 分支名 → 保留条数
+          rerank: QA 模式可传 False 跳过 LLM Rerank
         """
         if branches is None:
             branches = ["civil"]
@@ -455,18 +517,24 @@ class ContractRetriever:
 
         km = _bridged_pair_k_multiplier(branches)
 
-        # 执行各分支
+        # ── 分支间并行 ──
         results: dict[str, list[dict]] = {}
-        for name in branches:
-            results[name] = self._search_branch(name, query, k_multiplier=km)[
-                : top_k.get(name, 5)
-            ]
+        with ThreadPoolExecutor(max_workers=len(branches)) as pool:
+            fut_map = {
+                pool.submit(self.search_branch, name, query, km, rerank): name
+                for name in branches
+            }
+            for fut in as_completed(fut_map):
+                name = fut_map[fut]
+                results[name] = fut.result()[: top_k.get(name, 5)]
 
-        # 按 priority 降序组装
-        sorted_branches = sorted(branches, key=lambda n: BRANCH_SPEC[n]["priority"])
+        # ── 组装 ──
+        sorted_branches = sorted(
+            branches, key=lambda n: BRANCH_SPEC[n]["priority"]
+        )
         parts = []
         for name in sorted_branches:
-            items = results[name]
+            items = results.get(name, [])
             if not items:
                 continue
             spec = BRANCH_SPEC[name]
@@ -475,12 +543,11 @@ class ContractRetriever:
             parts.append(f"（{spec['description']}）")
             parts.append("=" * 60)
             for r in items:
-                parts.append(r["block_text"])
+                if r.get("block_text"):
+                    parts.append(r["block_text"])
                 parts.append(
-                    f">> 评分: 适用性={r['applicability']} "
-                    f"完整性={r['completeness']} "
-                    f"互补性={r['complementarity']} "
-                    f"总分={r['total']} | {r['reason']}"
+                    f">> 总分={r.get('total','?')} "
+                    f"| {r.get('verdict','')}"
                 )
             parts.append("")
 
