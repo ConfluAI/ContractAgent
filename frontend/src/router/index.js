@@ -20,6 +20,7 @@ const routes = [
       { path: "", redirect: "/admin/dashboard" },
       { path: "dashboard", component: () => import("../views/admin/Dashboard.vue"), meta: { title: "管理首页" } },
       { path: "users", component: () => import("../views/admin/UserManagement.vue"), meta: { title: "用户管理" } },
+      { path: "qa", component: () => import("../components/QAQueryPage.vue"), meta: { title: "法律咨询" } },
       { path: "review", component: () => import("../components/ContractReviewPage.vue"), meta: { title: "合同审查" } },
       { path: "history", component: () => import("../components/QueryHistoryPage.vue"), meta: { title: "查询历史" } },
     ],
@@ -31,6 +32,7 @@ const routes = [
     children: [
       { path: "", redirect: "/user/dashboard" },
       { path: "dashboard", component: () => import("../views/admin/Dashboard.vue"), meta: { title: "个人信息" } },
+      { path: "qa", component: () => import("../components/QAQueryPage.vue"), meta: { title: "法律咨询" } },
       { path: "review", component: () => import("../components/ContractReviewPage.vue"), meta: { title: "合同审查" } },
       { path: "history", component: () => import("../components/QueryHistoryPage.vue"), meta: { title: "查询历史" } },
     ],

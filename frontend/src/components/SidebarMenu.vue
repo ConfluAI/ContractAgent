@@ -41,6 +41,11 @@
       <span>功能区</span>
     </div>
 
+    <el-menu-item :index="qaPath">
+      <el-icon><ChatDotRound /></el-icon>
+      <span>合同条款咨询</span>
+    </el-menu-item>
+
     <el-menu-item :index="reviewPath">
       <el-icon><Document /></el-icon>
       <span>合同审查</span>
@@ -64,6 +69,7 @@ import { useAuthStore } from "../stores/auth";
 const authStore = useAuthStore();
 const isAdmin = computed(() => authStore.user?.role === "admin");
 const dashboardPath = computed(() => isAdmin.value ? "/admin/dashboard" : "/user/dashboard");
+const qaPath = computed(() => isAdmin.value ? "/admin/qa" : "/user/qa");
 const reviewPath = computed(() => isAdmin.value ? "/admin/review" : "/user/review");
 const historyPath = computed(() => isAdmin.value ? "/admin/history" : "/user/history");
 </script>
