@@ -8,10 +8,13 @@ from typing import TypedDict
 
 
 class WorkflowState(TypedDict):
-    input: str              # contract text or review question (always populated)
-    file_path: str          # optional path to docx/pdf file, parsed into input
-    contract_type: str      # "labor" | "civil" | "mixed" — set by dispatcher
-    branches: list[str]     # derived from contract_type, fed to retriever
-    retrieval_result: dict  # output of ContractRetriever.search()
-    review_output: str      # final LLM contract review
-    error: str              # error message if any node fails
+    input: str
+    file_path: str
+    contract_type: str
+    branches: list[str]
+    civil_result: list[dict]
+    labor_result: list[dict]
+    retrieval_result: dict
+    review_output: str
+    error: str
+    rerank: bool             
