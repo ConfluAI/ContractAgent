@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.database import get_db
 from server.schemas.review import ReviewRequest, ReviewResponse
-from server.services.review_service import run_review
+from server.services.review_service import run_review, run_qa_service
 from server.services.history_service import create_history
 from server.auth.dependencies import get_current_user
 from server.models.user import User
@@ -66,6 +66,29 @@ async def upload_file(
         db,
         user_id=current_user.id,
         query_input=f"[文件上传] {file.filename}",
+        contract_type=result["contract_type"],
+        review_output=result["review_output"],
+    )
+    return ReviewResponse(
+        id=history.id,
+        contract_type=result["contract_type"],
+        branches=result["branches"],
+        review_output=result["review_output"],
+        error=result["error"],
+    )
+
+
+@router.post("/qa", response_model=ReviewResponse)
+async def qa_text(
+    body: ReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await run_qa_service(question=body.text)
+    history = await create_history(
+        db,
+        user_id=current_user.id,
+        query_input=body.text,
         contract_type=result["contract_type"],
         review_output=result["review_output"],
     )

@@ -16,7 +16,7 @@ load_dotenv()
 MODELS = {
     # 词嵌入：BGE 中文专用，完全免费
     "embedding": "BAAI/bge-large-zh-v1.5",
-    # 合同审查主模型
+    # 审查 / QA / Rerank 统一模型
     "review_llm": "deepseek-ai/DeepSeek-V3",
 }
 
