@@ -57,25 +57,31 @@ REVIEWER_SYSTEM = """你是一位资深合同法律师，擅长中国合同法�
 
 def reviewer_node(state: WorkflowState) -> dict:
     """基于检索结果进行合同审查。"""
-    client = get_client()
-    model = model_name("review_llm")
+    if state.get("error"):
+        return {}
 
-    legal_basis = state["retrieval_result"].get("assembled_text", "")
+    try:
+        client = get_client()
+        model = model_name("review_llm")
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": REVIEWER_SYSTEM},
-            {
-                "role": "user",
-                "content": REVIEWER_PROMPT.format(
-                    input=state["input"],
-                    legal_basis=legal_basis,
-                ),
-            },
-        ],
-        temperature=0.3,
-    )
+        legal_basis = state["retrieval_result"].get("assembled_text", "")
 
-    review_text = resp.choices[0].message.content.strip()
-    return {"review_output": review_text}
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": REVIEWER_SYSTEM},
+                {
+                    "role": "user",
+                    "content": REVIEWER_PROMPT.format(
+                        input=state["input"],
+                        legal_basis=legal_basis,
+                    ),
+                },
+            ],
+            temperature=0.3,
+        )
+
+        review_text = resp.choices[0].message.content.strip()
+        return {"review_output": review_text}
+    except Exception as e:
+        return {"error": f"[合同审查] {e}"}
