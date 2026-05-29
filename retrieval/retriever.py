@@ -361,6 +361,47 @@ def _build_cache(store: Chroma) -> dict[int, Document]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 共享组装函数
+# ═══════════════════════════════════════════════════════════════════════════
+
+def assemble_branch_results(
+    branch_items: dict[str, list[dict]],
+    branches: list[str],
+) -> dict:
+    """按 BRANCH_SPEC priority 组装分支检索结果为 assembled_text。
+
+    供 workflow._merge_retrieval_node 和 ContractRetriever.search() 共用。
+    """
+    sorted_branches = sorted(
+        branches, key=lambda n: BRANCH_SPEC[n]["priority"]
+    )
+    parts = []
+    for name in sorted_branches:
+        items = branch_items.get(name, [])
+        if not items:
+            continue
+        spec = BRANCH_SPEC[name]
+        parts.append("=" * 60)
+        parts.append(f"【第{spec['priority']}优先级：{spec['label']}】")
+        parts.append(f"（{spec['description']}）")
+        parts.append("=" * 60)
+        for r in items:
+            if r.get("block_text"):
+                parts.append(r["block_text"])
+            parts.append(
+                f">> 总分={r.get('total','?')} "
+                f"| {r.get('verdict','')}"
+            )
+        parts.append("")
+
+    return {
+        **branch_items,
+        "activated_branches": branches,
+        "assembled_text": "\n".join(parts).strip(),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 主检索器
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -529,30 +570,4 @@ class ContractRetriever:
                 results[name] = fut.result()[: top_k.get(name, 5)]
 
         # ── 组装 ──
-        sorted_branches = sorted(
-            branches, key=lambda n: BRANCH_SPEC[n]["priority"]
-        )
-        parts = []
-        for name in sorted_branches:
-            items = results.get(name, [])
-            if not items:
-                continue
-            spec = BRANCH_SPEC[name]
-            parts.append("=" * 60)
-            parts.append(f"【第{spec['priority']}优先级：{spec['label']}】")
-            parts.append(f"（{spec['description']}）")
-            parts.append("=" * 60)
-            for r in items:
-                if r.get("block_text"):
-                    parts.append(r["block_text"])
-                parts.append(
-                    f">> 总分={r.get('total','?')} "
-                    f"| {r.get('verdict','')}"
-                )
-            parts.append("")
-
-        return {
-            **results,
-            "activated_branches": branches,
-            "assembled_text": "\n".join(parts).strip(),
-        }
+        return assemble_branch_results(results, branches)
