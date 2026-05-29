@@ -19,7 +19,11 @@ request.interceptors.response.use(
   (err) => {
     if (err.response?.status === 401) {
       localStorage.removeItem("token");
-      window.location.href = "/login";
+      const msg = err.response?.data?.detail || "登录已过期，请重新登录";
+      ElMessage.error(msg);
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
     } else if (err.response?.data?.detail) {
       ElMessage.error(err.response.data.detail);
     }
