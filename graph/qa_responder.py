@@ -50,25 +50,31 @@ QA_SYSTEM = """你是一位资深中国法律顾问，擅长合同法与劳动�
 
 
 def qa_responder_node(state: WorkflowState) -> dict:
-    client = get_client()
-    model = model_name("review_llm")
+    if state.get("error"):
+        return {}
 
-    legal_basis = state["retrieval_result"].get("assembled_text", "")
+    try:
+        client = get_client()
+        model = model_name("review_llm")
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": QA_SYSTEM},
-            {
-                "role": "user",
-                "content": QA_RESPONDER_PROMPT.format(
-                    input=state["input"],
-                    legal_basis=legal_basis,
-                ),
-            },
-        ],
-        temperature=0.3,
-    )
+        legal_basis = state["retrieval_result"].get("assembled_text", "")
 
-    answer = resp.choices[0].message.content.strip()
-    return {"review_output": answer}
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": QA_SYSTEM},
+                {
+                    "role": "user",
+                    "content": QA_RESPONDER_PROMPT.format(
+                        input=state["input"],
+                        legal_basis=legal_basis,
+                    ),
+                },
+            ],
+            temperature=0.3,
+        )
+
+        answer = resp.choices[0].message.content.strip()
+        return {"review_output": answer}
+    except Exception as e:
+        return {"error": f"[法律咨询] {e}"}
