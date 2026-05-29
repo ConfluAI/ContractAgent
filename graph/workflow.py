@@ -43,58 +43,43 @@ def _get_retriever() -> ContractRetriever:
 
 def _civil_retriever_node(state: WorkflowState) -> dict:
     """民事分支 — 永远执行，民法是母法兜底。"""
-    r = _get_retriever()
-    rerank = state.get("rerank", True)
-    result = r.search_branch("civil", state["input"], rerank=rerank)
-    return {"civil_result": result}
+    if state.get("error"):
+        return {}
+    try:
+        r = _get_retriever()
+        rerank = state.get("rerank", True)
+        result = r.search_branch("civil", state["input"], rerank=rerank)
+        return {"civil_result": result}
+    except Exception as e:
+        return {"error": f"[民事检索] {e}"}
 
 
 def _labor_retriever_node(state: WorkflowState) -> dict:
     """劳动分支 — 仅当 dispatcher 指定了 labor 时执行。"""
+    if state.get("error"):
+        return {}
     if "labor" not in state["branches"]:
         return {"labor_result": []}
-    r = _get_retriever()
-    rerank = state.get("rerank", True)
-    result = r.search_branch("labor", state["input"], rerank=rerank)
-    return {"labor_result": result}
+    try:
+        r = _get_retriever()
+        rerank = state.get("rerank", True)
+        result = r.search_branch("labor", state["input"], rerank=rerank)
+        return {"labor_result": result}
+    except Exception as e:
+        return {"error": f"[劳动检索] {e}"}
 
 
 def _merge_retrieval_node(state: WorkflowState) -> dict:
     """汇聚并行分支结果 → assembled_text。"""
-    civil = state.get("civil_result", [])
-    labor = state.get("labor_result", [])
-    branches = state["branches"]
+    if state.get("error"):
+        return {}
+    from retrieval.retriever import assemble_branch_results
 
-    # 按 priority 组装
-    from retrieval.retriever import BRANCH_SPEC
-
-    parts = []
-    processed = {}
-
-    for name in branches:
-        items = civil if name == "civil" else labor
-        spec = BRANCH_SPEC[name]
-        parts.append("=" * 60)
-        parts.append(f"【第{spec['priority']}优先级：{spec['label']}】")
-        parts.append(f"（{spec['description']}）")
-        parts.append("=" * 60)
-        for r in items:
-            if r.get("block_text"):
-                parts.append(r["block_text"])
-            parts.append(
-                f">> 总分={r.get('total','?')} "
-                f"| {r.get('verdict','')}"
-            )
-        parts.append("")
-        processed[name] = items
-
-    return {
-        "retrieval_result": {
-            **processed,
-            "activated_branches": branches,
-            "assembled_text": "\n".join(parts).strip(),
-        },
+    branch_items = {
+        "civil": state.get("civil_result", []),
+        "labor": state.get("labor_result", []),
     }
+    return {"retrieval_result": assemble_branch_results(branch_items, state["branches"])}
 
 
 # ── Shared node set ─────────────────────────────────────────────────────
@@ -144,7 +129,21 @@ def run_contract_review(user_input: str = "", file_path: str = "") -> dict:
         "error": "",
         "rerank": True,
     }
-    result = _review_graph.invoke(initial_state)
+    try:
+        result = _review_graph.invoke(initial_state)
+    except Exception as e:
+        return {
+            "contract_type": "",
+            "branches": [],
+            "civil_result": [],
+            "labor_result": [],
+            "retrieval_result": {},
+            "review_output": "",
+            "error": f"审查工作流异常: {e}",
+            "rerank": True,
+            "input": user_input,
+            "file_path": file_path,
+        }
     return result
 
 
@@ -176,7 +175,21 @@ def run_qa(question: str) -> dict:
         "error": "",
         "rerank": True,
     }
-    result = _qa_graph.invoke(initial_state)
+    try:
+        result = _qa_graph.invoke(initial_state)
+    except Exception as e:
+        return {
+            "contract_type": "",
+            "branches": [],
+            "civil_result": [],
+            "labor_result": [],
+            "retrieval_result": {},
+            "review_output": "",
+            "error": f"咨询工作流异常: {e}",
+            "rerank": True,
+            "input": question,
+            "file_path": "",
+        }
     return result
 
 
