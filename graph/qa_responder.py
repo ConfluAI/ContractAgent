@@ -50,9 +50,6 @@ QA_SYSTEM = """你是一位资深中国法律顾问，擅长合同法与劳动�
 
 
 def qa_responder_node(state: WorkflowState) -> dict:
-    if state.get("error"):
-        return {}
-
     try:
         client = get_client()
         model = model_name("review_llm")

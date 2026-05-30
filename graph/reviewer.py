@@ -57,9 +57,6 @@ REVIEWER_SYSTEM = """你是一位资深合同法律师，擅长中国合同法�
 
 def reviewer_node(state: WorkflowState) -> dict:
     """基于检索结果进行合同审查。"""
-    if state.get("error"):
-        return {}
-
     try:
         client = get_client()
         model = model_name("review_llm")

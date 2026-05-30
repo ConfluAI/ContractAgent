@@ -1,15 +1,22 @@
 """
 LangGraph workflows — contract review + question answering.
 
+图结构从 BRANCH_SPEC 自动生成。新增分支只需在 BRANCH_SPEC + dispatcher 加配置，
+无需修改此文件。
+
+Error routing:
+  - dispatcher / merge 出错 → 条件边跳 END（致命）
+  - retriever 出错 → 降级返回空列表，不中断图（非致命）
+
 Review graph:
-    START → parser → dispatcher ─┬─ civil_retriever ─┬─ merge → reviewer → END
-                                  └─ labor_retriever ─┘
-                                  (并行, civil 永远执行, labor 按需)
+    START → parser → dispatcher ─┬─ {branch}_retriever* ─┬─ merge → reviewer → END
+                    ↓ (error)     └─ ... ────────────────┘    ↓ (error)
+                   END                                        END
 
 QA graph:
-    START → dispatcher ─┬─ civil_retriever ─┬─ merge → qa_responder → END
-                         └─ labor_retriever ─┘
-                         (并行, QA 模式跳过 LLM Rerank)
+    START → dispatcher ─┬─ {branch}_retriever* ─┬─ merge → qa_responder → END
+               ↓ (error)└─ ... ────────────────┘    ↓ (error)
+              END                                    END
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from graph.parser import parser_node
 from graph.dispatcher import dispatcher_node
 from graph.reviewer import reviewer_node
 from graph.qa_responder import qa_responder_node
-from retrieval.retriever import ContractRetriever
+from retrieval.retriever import ContractRetriever, BRANCH_SPEC
 
 
 _retriever: ContractRetriever | None = None
@@ -39,67 +46,83 @@ def _get_retriever() -> ContractRetriever:
     return _retriever
 
 
-# ── Branch retriever nodes (fan-out from dispatcher, run in parallel) ──
+# ── Retriever node factory (generated from BRANCH_SPEC) ──────────────────
 
-def _civil_retriever_node(state: WorkflowState) -> dict:
-    """民事分支 — 永远执行，民法是母法兜底。"""
-    if state.get("error"):
-        return {}
-    try:
-        r = _get_retriever()
-        rerank = state.get("rerank", True)
-        result = r.search_branch("civil", state["input"], rerank=rerank)
-        return {"civil_result": result}
-    except Exception as e:
-        return {"error": f"[民事检索] {e}"}
-
-
-def _labor_retriever_node(state: WorkflowState) -> dict:
-    """劳动分支 — 仅当 dispatcher 指定了 labor 时执行。"""
-    if state.get("error"):
-        return {}
-    if "labor" not in state["branches"]:
-        return {"labor_result": []}
-    try:
-        r = _get_retriever()
-        rerank = state.get("rerank", True)
-        result = r.search_branch("labor", state["input"], rerank=rerank)
-        return {"labor_result": result}
-    except Exception as e:
-        return {"error": f"[劳动检索] {e}"}
+def _make_retriever_node(branch_name: str):
+    """工厂函数：为指定分支生成检索节点。
+    节点名 = "{branch_name}_retriever"，由 _build_retrieval_layer 注册。
+    """
+    def _node(state: WorkflowState) -> dict:
+        if branch_name not in state["branches"]:
+            return {"branch_results": {branch_name: []}}
+        try:
+            r = _get_retriever()
+            rerank = state.get("rerank", True)
+            result = r.search_branch(branch_name, state["input"], rerank=rerank)
+            return {"branch_results": {branch_name: result}}
+        except Exception:
+            return {"branch_results": {branch_name: []}}
+    return _node
 
 
 def _merge_retrieval_node(state: WorkflowState) -> dict:
-    """汇聚并行分支结果 → assembled_text。"""
-    if state.get("error"):
-        return {}
+    """汇聚所有分支结果 → assembled_text + 非致命警告。"""
     from retrieval.retriever import assemble_branch_results
 
-    branch_items = {
-        "civil": state.get("civil_result", []),
-        "labor": state.get("labor_result", []),
-    }
-    return {"retrieval_result": assemble_branch_results(branch_items, state["branches"])}
+    try:
+        results = dict(state.get("branch_results", {}))
+        branches = state.get("branches", [])
+
+        # 非致命警告：某分支应激活但无结果
+        warnings: list[str] = []
+        for bn in branches:
+            items = results.get(bn, [])
+            if not items:
+                label = BRANCH_SPEC.get(bn, {}).get("label", bn)
+                warnings.append(f"⚠ {label}检索未返回结果")
+
+        rv = {"retrieval_result": assemble_branch_results(results, branches)}
+        if warnings:
+            rv["warnings"] = warnings
+        return rv
+    except Exception as e:
+        return {"error": f"[检索汇聚] {e}"}
 
 
-# ── Shared node set ─────────────────────────────────────────────────────
+# ── Error routing ────────────────────────────────────────────────────────
+
+def _route_from_dispatcher(state: WorkflowState) -> str | list[str]:
+    """致命错误 → END；正常 → fan-out 到所有激活分支的检索节点。"""
+    if state.get("error"):
+        return END
+    return [f"{b}_retriever" for b in state["branches"]]
+
+
+def _route_from_merge(state: WorkflowState) -> str:
+    """致命错误 → END。"""
+    if state.get("error"):
+        return END
+    return "continue"
+
+
+# ── Shared retrieval layer (node names from BRANCH_SPEC) ─────────────────
 
 def _build_retrieval_layer(builder: StateGraph) -> None:
-    """Add parallel retrieval nodes to a graph builder (shared by both graphs)."""
-    builder.add_node("civil_retriever", _civil_retriever_node)
-    builder.add_node("labor_retriever", _labor_retriever_node)
+    """从 BRANCH_SPEC 自动生成 retriever 节点 + 边。新增分支零改动。"""
     builder.add_node("merge_retrieval", _merge_retrieval_node)
 
-    # dispatcher → fan-out to both branches (LangGraph runs them in parallel)
-    builder.add_edge("dispatcher", "civil_retriever")
-    builder.add_edge("dispatcher", "labor_retriever")
+    route_map: dict[str, str] = {END: END}
+    for branch_name in BRANCH_SPEC:
+        node_name = f"{branch_name}_retriever"
+        builder.add_node(node_name, _make_retriever_node(branch_name))
+        builder.add_edge(node_name, "merge_retrieval")
+        route_map[node_name] = node_name
 
-    # both → merge
-    builder.add_edge("civil_retriever", "merge_retrieval")
-    builder.add_edge("labor_retriever", "merge_retrieval")
+    # dispatcher → fan-out（动态路由到激活分支）/ END
+    builder.add_conditional_edges("dispatcher", _route_from_dispatcher, route_map)
 
 
-# ── Contract Review Graph ────────────────────────────────────────────────────
+# ── Contract Review Graph ────────────────────────────────────────────────
 
 _review_graph_builder = StateGraph(WorkflowState)
 
@@ -109,45 +132,58 @@ _build_retrieval_layer(_review_graph_builder)
 _review_graph_builder.add_node("reviewer", reviewer_node)
 
 _review_graph_builder.add_edge("parser", "dispatcher")
-_review_graph_builder.add_edge("merge_retrieval", "reviewer")
+_review_graph_builder.add_conditional_edges("merge_retrieval", _route_from_merge, {
+    "continue": "reviewer",
+    END: END,
+})
 _review_graph_builder.add_edge("reviewer", END)
 _review_graph_builder.set_entry_point("parser")
 
 _review_graph = _review_graph_builder.compile()
 
 
-def run_contract_review(user_input: str = "", file_path: str = "") -> dict:
-    initial_state: WorkflowState = {
+def _make_initial_state(user_input: str = "", file_path: str = "") -> WorkflowState:
+    return {
         "input": user_input,
         "file_path": file_path,
         "contract_type": "",
         "branches": [],
-        "civil_result": [],
-        "labor_result": [],
+        "branch_results": {},
         "retrieval_result": {},
         "review_output": "",
         "error": "",
+        "warnings": [],
         "rerank": True,
     }
+
+
+def _make_error_return(err_msg: str, **extra) -> dict:
+    return {
+        "contract_type": "",
+        "branches": [],
+        "branch_results": {},
+        "retrieval_result": {},
+        "review_output": "",
+        "error": err_msg,
+        "warnings": [],
+        "rerank": True,
+        **extra,
+    }
+
+
+def run_contract_review(user_input: str = "", file_path: str = "") -> dict:
+    initial_state = _make_initial_state(user_input, file_path)
     try:
         result = _review_graph.invoke(initial_state)
     except Exception as e:
-        return {
-            "contract_type": "",
-            "branches": [],
-            "civil_result": [],
-            "labor_result": [],
-            "retrieval_result": {},
-            "review_output": "",
-            "error": f"审查工作流异常: {e}",
-            "rerank": True,
-            "input": user_input,
-            "file_path": file_path,
-        }
+        return _make_error_return(
+            f"审查工作流异常: {e}",
+            input=user_input, file_path=file_path,
+        )
     return result
 
 
-# ── Question Answering Graph ─────────────────────────────────────────────────
+# ── Question Answering Graph ─────────────────────────────────────────────
 
 _qa_graph_builder = StateGraph(WorkflowState)
 
@@ -155,7 +191,10 @@ _qa_graph_builder.add_node("dispatcher", dispatcher_node)
 _build_retrieval_layer(_qa_graph_builder)
 _qa_graph_builder.add_node("qa_responder", qa_responder_node)
 
-_qa_graph_builder.add_edge("merge_retrieval", "qa_responder")
+_qa_graph_builder.add_conditional_edges("merge_retrieval", _route_from_merge, {
+    "continue": "qa_responder",
+    END: END,
+})
 _qa_graph_builder.add_edge("qa_responder", END)
 _qa_graph_builder.set_entry_point("dispatcher")
 
@@ -163,33 +202,14 @@ _qa_graph = _qa_graph_builder.compile()
 
 
 def run_qa(question: str) -> dict:
-    initial_state: WorkflowState = {
-        "input": question,
-        "file_path": "",
-        "contract_type": "",
-        "branches": [],
-        "civil_result": [],
-        "labor_result": [],
-        "retrieval_result": {},
-        "review_output": "",
-        "error": "",
-        "rerank": True,
-    }
+    initial_state = _make_initial_state(question, "")
     try:
         result = _qa_graph.invoke(initial_state)
     except Exception as e:
-        return {
-            "contract_type": "",
-            "branches": [],
-            "civil_result": [],
-            "labor_result": [],
-            "retrieval_result": {},
-            "review_output": "",
-            "error": f"咨询工作流异常: {e}",
-            "rerank": True,
-            "input": question,
-            "file_path": "",
-        }
+        return _make_error_return(
+            f"咨询工作流异常: {e}",
+            input=question, file_path="",
+        )
     return result
 
 
