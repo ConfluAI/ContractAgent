@@ -10,6 +10,7 @@ async def run_review(user_input: str = "", file_path: str = "") -> dict:
         "branches": result.get("branches", []),
         "review_output": result.get("review_output", ""),
         "error": result.get("error", ""),
+        "warnings": result.get("warnings", []),
     }
 
 
@@ -20,4 +21,5 @@ async def run_qa_service(question: str) -> dict:
         "branches": result.get("branches", []),
         "review_output": result.get("review_output", ""),
         "error": result.get("error", ""),
+        "warnings": result.get("warnings", []),
     }

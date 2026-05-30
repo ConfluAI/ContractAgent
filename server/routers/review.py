@@ -36,6 +36,7 @@ async def review_text(
         branches=result["branches"],
         review_output=result["review_output"],
         error=result["error"],
+        warnings=result.get("warnings", []),
     )
 
 
@@ -75,6 +76,7 @@ async def upload_file(
         branches=result["branches"],
         review_output=result["review_output"],
         error=result["error"],
+        warnings=result.get("warnings", []),
     )
 
 
@@ -98,4 +100,5 @@ async def qa_text(
         branches=result["branches"],
         review_output=result["review_output"],
         error=result["error"],
+        warnings=result.get("warnings", []),
     )

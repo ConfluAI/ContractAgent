@@ -11,3 +11,4 @@ class ReviewResponse(BaseModel):
     branches: list[str]
     review_output: str
     error: str
+    warnings: list[str] = []
