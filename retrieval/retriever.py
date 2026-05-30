@@ -23,7 +23,7 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from config.models import get_client, model_name
-from retrieval.loaders import load_bridge, load_labor_contract_bridge
+from retrieval.loaders import load_bridge
 from retrieval.embeddings import SiliconFlowEmbeddings
 
 PERSIST_DIR = str(Path(__file__).resolve().parent.parent / "data" / "chroma_civil_code")
@@ -42,7 +42,7 @@ BRANCH_SPEC: dict[str, dict[str, Any]] = {
             "secondary": "judicial_interpretation",
             "primary_k": 2,
             "secondary_k": 2,
-            "bridge_loader": lambda: load_bridge(),
+            "bridge_loader": lambda: load_bridge("civil_code"),
             "primary_to_secondary": "civil_to_interpretation",
             "secondary_to_primary": "interpretation_to_civil",
         }],
@@ -58,7 +58,7 @@ BRANCH_SPEC: dict[str, dict[str, Any]] = {
             "secondary": "labor_contract_regulation",
             "primary_k": 2,   # 从 3 降到 2，减少桥接膨胀
             "secondary_k": 2,
-            "bridge_loader": lambda: load_labor_contract_bridge(),
+            "bridge_loader": lambda: load_bridge("labor_contract_law"),
             "primary_to_secondary": "labor_contract_law_to_regulation",
             "secondary_to_primary": "regulation_to_labor_contract_law",
         }],
@@ -82,7 +82,8 @@ def _all_collections() -> list[str]:
 
 
 def _bridged_pair_k_multiplier(active_branches: list[str]) -> int:
-    return 2 if active_branches == ["civil"] else 1
+    """当只有 1 个分支时放大 k 值（唯一依据需要更多候选）。"""
+    return 2 if len(active_branches) == 1 else 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -108,39 +109,39 @@ def _fmt_source(meta: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _assemble_block(pair: dict, idx: int) -> str:
-    civil = pair["civil"]
-    interp = pair["interp"]
+    primary = pair["primary"]
+    secondary = pair["secondary"]
 
     parts = [f"【单元 {chr(65 + idx)}】"]
 
-    if civil:
-        cid = civil.metadata.get("section_id", "")
-        text = civil.page_content
-        pos = text.find(cid) if cid else -1
+    if primary:
+        pid = primary.metadata.get("section_id", "")
+        text = primary.page_content
+        pos = text.find(pid) if pid else -1
         body = text[pos:] if pos >= 0 else text
-        parts.append(f"[{_fmt_source(civil.metadata)}] {body[:400]}")
+        parts.append(f"[{_fmt_source(primary.metadata)}] {body[:400]}")
     else:
         parts.append("（无上位法配对）")
 
-    if interp:
-        iid = interp.metadata.get("section_id", "")
-        itext = interp.page_content
-        pos = itext.find(iid) if iid else -1
-        body = itext[pos:] if pos >= 0 else itext
-        parts.append(f"[{_fmt_source(interp.metadata)}] {body[:400]}")
+    if secondary:
+        sid = secondary.metadata.get("section_id", "")
+        stext = secondary.page_content
+        pos = stext.find(sid) if sid else -1
+        body = stext[pos:] if pos >= 0 else stext
+        parts.append(f"[{_fmt_source(secondary.metadata)}] {body[:400]}")
 
     return "\n".join(parts)
 
 
-def _derive_tags(civil: Document | None, interp: Document | None) -> list[str]:
+def _derive_tags(primary: Document | None, secondary: Document | None) -> list[str]:
     tags = []
-    if civil:
+    if primary:
         for field in ("domain", "chapter"):
-            val = civil.metadata.get(field, "")
+            val = primary.metadata.get(field, "")
             if val and val not in tags:
                 tags.append(val)
-    if interp:
-        domain = interp.metadata.get("domain", "")
+    if secondary:
+        domain = secondary.metadata.get("domain", "")
         if domain and domain not in tags:
             tags.append(domain)
     return tags
@@ -193,25 +194,25 @@ def _bridge_completion(
         if sub_nums:
             for snum in sub_nums:
                 pairs.append({
-                    "civil": law_doc,
-                    "interp": sub_by_num.get(snum),
+                    "primary": law_doc,
+                    "secondary": sub_by_num.get(snum),
                     "tags": _derive_tags(law_doc, sub_by_num.get(snum)),
                     "_source": "bridged",
                 })
         else:
             pairs.append({
-                "civil": law_doc,
-                "interp": None,
+                "primary": law_doc,
+                "secondary": None,
                 "tags": _derive_tags(law_doc, None),
                 "_source": "direct",
             })
 
-    used_snums = {p["interp"].metadata["article_num"] for p in pairs if p["interp"]}
+    used_snums = {p["secondary"].metadata["article_num"] for p in pairs if p["secondary"]}
     for snum, sub_doc in sub_by_num.items():
         if snum not in used_snums:
             pairs.append({
-                "civil": None,
-                "interp": sub_doc,
+                "primary": None,
+                "secondary": sub_doc,
                 "tags": _derive_tags(None, sub_doc),
                 "_source": "orphan",
             })
@@ -223,8 +224,8 @@ def _dedup_pairs(pairs: list[dict]) -> list[dict]:
     seen = set()
     unique = []
     for p in pairs:
-        cnum = p["civil"].metadata["article_num"] if p["civil"] else None
-        inum = p["interp"].metadata["article_num"] if p["interp"] else None
+        cnum = p["primary"].metadata["article_num"] if p["primary"] else None
+        inum = p["secondary"].metadata["article_num"] if p["secondary"] else None
         key = (cnum, inum)
         if key not in seen:
             seen.add(key)
@@ -341,8 +342,8 @@ def _vector_sort(pairs: list[dict]) -> list[dict]:
         scored.append({
             "applicability": applicability,
             "completeness": 3,
-            "complementarity": 3 if p["interp"] else 1,
-            "total": applicability + 3 + (3 if p["interp"] else 1),
+            "complementarity": 3 if p["secondary"] else 1,
+            "total": applicability + 3 + (3 if p["secondary"] else 1),
             "reason": "向量相似度排序（QA 模式）",
             "verdict": "RELEVANT" if applicability >= 3 else "IRRELEVANT",
             "pair": p,
@@ -502,8 +503,8 @@ class ContractRetriever:
         for sa in spec.get("standalone", []):
             for doc in search_tasks.get(f"sa:{sa['collection']}", []):
                 all_pairs.append({
-                    "civil": doc,
-                    "interp": None,
+                    "primary": doc,
+                    "secondary": None,
                     "tags": _derive_tags(doc, None),
                     "_source": "direct",
                 })
@@ -554,7 +555,7 @@ class ContractRetriever:
         if branches is None:
             branches = ["civil"]
         if top_k is None:
-            top_k = {"civil": 3, "labor": 5}
+            top_k = {b: 5 for b in branches}
 
         km = _bridged_pair_k_multiplier(branches)
 
