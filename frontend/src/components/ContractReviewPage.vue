@@ -76,7 +76,18 @@
             <p class="loading-hint">这可能需要 10-30 秒</p>
           </div>
 
-          <ReviewResult v-else-if="reviewResult" :output="reviewResult" />
+          <template v-else-if="reviewResult">
+            <el-alert
+              v-for="(w, i) in warnings"
+              :key="i"
+              :title="w"
+              type="warning"
+              show-icon
+              :closable="false"
+              style="margin-bottom: 12px"
+            />
+            <ReviewResult :output="reviewResult" />
+          </template>
 
           <div v-else class="empty-state">
             <el-icon :size="64" color="#c0c4cc"><Document /></el-icon>
@@ -111,6 +122,7 @@ import ReviewResult from "./ReviewResult.vue";
 const selectedFile = ref(null);
 const reviewing = ref(false);
 const reviewResult = ref("");
+const warnings = ref([]);
 
 function handleFileChange(file) {
   selectedFile.value = file.raw;
@@ -123,8 +135,10 @@ async function handleFileReview() {
   }
   reviewing.value = true;
   reviewResult.value = "";
+  warnings.value = [];
   try {
     const { data } = await uploadFile(selectedFile.value);
+    warnings.value = data.warnings || [];
     if (data.error) {
       ElMessage.error(data.error);
     } else {

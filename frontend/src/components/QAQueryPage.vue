@@ -56,6 +56,15 @@
           </div>
 
           <div v-else-if="result" class="result-text">
+            <el-alert
+              v-for="(w, i) in warnings"
+              :key="i"
+              :title="w"
+              type="warning"
+              show-icon
+              :closable="false"
+              style="margin-bottom: 12px"
+            />
             <ReviewResult :output="result" />
           </div>
 
@@ -80,6 +89,7 @@ const question = ref("");
 const loading = ref(false);
 const result = ref("");
 const meta = ref({ contract_type: "", branches: [] });
+const warnings = ref([]);
 
 const contractTypeLabel = computed(() => {
   const t = meta.value.contract_type;
@@ -96,6 +106,7 @@ async function handleAsk() {
   loading.value = true;
   result.value = "";
   meta.value = { contract_type: "", branches: [] };
+  warnings.value = [];
   try {
     const { data } = await submitQA(question.value);
     result.value = data.review_output || "";
@@ -103,6 +114,7 @@ async function handleAsk() {
       contract_type: data.contract_type || "",
       branches: data.branches || [],
     };
+    warnings.value = data.warnings || [];
   } catch (e) {
     ElMessage.error("查询失败：" + (e.response?.data?.detail || e.message));
   } finally {
