@@ -9,6 +9,8 @@ Dispatcher node — 判断是否激活专项法分支。
 import json
 import re
 
+from openai import BadRequestError, AuthenticationError
+
 from config.models import get_client, model_name
 from graph.state import WorkflowState
 
@@ -72,7 +74,13 @@ def _parse_dispatcher_response(raw: str) -> dict:
 
 
 def dispatcher_node(state: WorkflowState) -> dict:
-    """决定激活哪些专项分支。civil 永远激活，无需判断。"""
+    """决定激活哪些专项分支。civil 永远激活，无需判断。
+
+    错误处理：
+      - BadRequestError / AuthenticationError → 致命，设 error 终止图
+      - Timeout / RateLimit / 连接中断 / JSON 解析失败等 → 向上抛，
+        LangGraph checkpoint 保存后可用相同 thread_id 重试
+    """
     if state.get("error"):
         return {}
 
@@ -93,5 +101,8 @@ def dispatcher_node(state: WorkflowState) -> dict:
             "contract_type": contract_type,
             "branches": ["civil"] + extra,
         }
-    except Exception as e:
+    except (BadRequestError, AuthenticationError) as e:
+        # 模型配置错 / API Key 无效 → 重试无意义
         return {"error": f"[合同分类] {e}"}
+    # Timeout / RateLimit / ConnectionError / InternalServerError /
+    # ValueError（LLM 返回非 JSON）→ 向上抛，checkpoint 恢复后重试

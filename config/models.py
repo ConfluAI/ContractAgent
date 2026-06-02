@@ -7,7 +7,7 @@
 import os
 from typing import Optional
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 load_dotenv()
 
@@ -23,9 +23,11 @@ MODELS = {
 # ── 客户端（单例）─────────────────────────────────────────────────────
 
 _client: Optional[OpenAI] = None
+_async_client: Optional[AsyncOpenAI] = None
 
 
 def get_client() -> OpenAI:
+    """同步 OpenAI 客户端 — 阻塞端点使用。"""
     global _client
     if _client is None:
         _client = OpenAI(
@@ -35,6 +37,19 @@ def get_client() -> OpenAI:
             ),
         )
     return _client
+
+
+def get_async_client() -> AsyncOpenAI:
+    """异步 OpenAI 客户端 — SSE 流式端点使用。"""
+    global _async_client
+    if _async_client is None:
+        _async_client = AsyncOpenAI(
+            api_key=os.environ["SILICONFLOW_API_KEY"],
+            base_url=os.environ.get(
+                "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+            ),
+        )
+    return _async_client
 
 
 def model_name(task: str) -> str:

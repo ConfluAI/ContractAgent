@@ -119,7 +119,8 @@ def _assemble_block(pair: dict, idx: int) -> str:
         text = primary.page_content
         pos = text.find(pid) if pid else -1
         body = text[pos:] if pos >= 0 else text
-        parts.append(f"[{_fmt_source(primary.metadata)}] {body[:400]}")
+        # 法条原文必须完整保留，不能截断
+        parts.append(f"[{_fmt_source(primary.metadata)}] {body}")
     else:
         parts.append("（无上位法配对）")
 
@@ -128,7 +129,8 @@ def _assemble_block(pair: dict, idx: int) -> str:
         stext = secondary.page_content
         pos = stext.find(sid) if sid else -1
         body = stext[pos:] if pos >= 0 else stext
-        parts.append(f"[{_fmt_source(secondary.metadata)}] {body[:400]}")
+        # 法条原文必须完整保留，不能截断
+        parts.append(f"[{_fmt_source(secondary.metadata)}] {body}")
 
     return "\n".join(parts)
 
@@ -321,8 +323,15 @@ def _llm_rerank(query: str, blocks: list[str]) -> list[dict]:
 def _merge_scores(
     scores: list[dict], pairs: list[dict], blocks: list[str]
 ) -> list[dict]:
+    """合并 Rerank 分数，只保留 RELEVANT 的结果。"""
     merged = []
     for s in scores:
+        idx = ord(s["unit"]) - 65
+        if 0 <= idx < len(pairs) and s.get("verdict") == "RELEVANT":
+            merged.append({**s, "pair": pairs[idx], "block_text": blocks[idx]})
+    # 兜底：全被标为 IRRELEVANT 时，最多保留 1 条避免完全空白
+    if not merged and scores:
+        s = scores[0]
         idx = ord(s["unit"]) - 65
         if 0 <= idx < len(pairs):
             merged.append({**s, "pair": pairs[idx], "block_text": blocks[idx]})
@@ -331,13 +340,13 @@ def _merge_scores(
 
 
 def _vector_sort(pairs: list[dict]) -> list[dict]:
-    """向量相似度简易排序：直接命中 > 桥接补全 > 孤儿。无 LLM 调用。"""
+    """向量相似度简易排序：直接命中 > 桥接补全 > 孤儿。无 LLM 调用。
+    只保留 RELEVANT，兜底保留 top 3。"""
     order = {"direct": 0, "bridged": 1, "orphan": 2}
     scored = []
     for p in pairs:
         source = p.pop("_source", "bridged")
         rank = order.get(source, 1)
-        # 直接命中给高分，桥接次之
         applicability = 4 if source == "direct" else 3 if source == "bridged" else 2
         scored.append({
             "applicability": applicability,
@@ -349,7 +358,10 @@ def _vector_sort(pairs: list[dict]) -> list[dict]:
             "pair": p,
         })
     scored.sort(key=lambda x: -x["total"])
-    return scored
+    relevant = [s for s in scored if s["verdict"] == "RELEVANT"]
+    if not relevant and scored:
+        relevant = scored[:1]
+    return relevant
 
 
 def _build_cache(store: Chroma) -> dict[int, Document]:

@@ -2,7 +2,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "mysql+aiomysql://root:123456@localhost:3306/contract_agent"
+    DATABASE_URL: str = "mysql+aiomysql://root:Jiangjf1314525.@localhost:3306/contract_agent"
+    REDIS_URL: str = "redis://localhost:6379/0"
+    POSTGRES_URL: str = "postgresql://contract:contract123@localhost:5432/contract_checkpoint"
+    CHECKPOINT_RETENTION_DAYS: int = 7
     JWT_SECRET_KEY: str = "contract-agent-jwt-secret-key-2024-very-long-and-secure-string"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440

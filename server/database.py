@@ -15,6 +15,8 @@ async def init_db():
     async with engine.begin() as conn:
         from server.models.user import User  # noqa: F401
         from server.models.query_history import QueryHistory  # noqa: F401
+        from server.models.conversation_thread import ConversationThread  # noqa: F401
+        from server.models.conversation_message import ConversationMessage  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 
 

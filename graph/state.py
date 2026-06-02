@@ -13,13 +13,14 @@ from typing import Annotated, TypedDict
 def _merge_branch_results(
     left: dict[str, list[dict]], right: dict[str, list[dict]]
 ) -> dict[str, list[dict]]:
-    """Reducer：合并两个分支结果字典，用于 Annotated 类型。"""
+    """Reducer：合并分支结果。空字典 {} 视为清空信号，用于 merge 后释放内存。"""
+    if not right:
+        return {}
     return {**left, **right}
 
 
 class WorkflowState(TypedDict):
     input: str
-    file_path: str
     contract_type: str
     branches: list[str]
     branch_results: Annotated[dict[str, list[dict]], _merge_branch_results]
@@ -27,4 +28,4 @@ class WorkflowState(TypedDict):
     review_output: str
     error: str
     warnings: list[str]
-    rerank: bool
+    # file_path, rerank, conversation_history → configurable（不变输入，不存 checkpoint）

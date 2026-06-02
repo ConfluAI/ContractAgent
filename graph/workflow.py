@@ -1,12 +1,14 @@
 """
 LangGraph workflows — contract review + question answering.
 
-图结构从 BRANCH_SPEC 自动生成。新增分支只需在 BRANCH_SPEC + dispatcher 加配置，
-无需修改此文件。
+两个图，各自支持 ainvoke（阻塞）和 astream(stream_mode="custom")（流式）。
 
-Error routing:
-  - dispatcher / merge 出错 → 条件边跳 END（致命）
-  - retriever 出错 → 降级返回空列表，不中断图（非致命）
+图结构从 BRANCH_SPEC 自动生成。新增分支只需在 BRANCH_SPEC + dispatcher 加配置。
+
+Error routing（三类错误，三种处理）:
+  非致命 — retriever 检索空结果 → 节点内 catch，降级返回 [] + warning，图继续
+  可恢复 — LLM 超时/限流/连接中断 → 不 catch，向上抛，LangGraph checkpoint 保存后可重试
+  真致命 — 模型配置错/API Key 无效 → 节点内 catch BadRequestError/AuthenticationError → END
 
 Review graph:
     START → parser → dispatcher ─┬─ {branch}_retriever* ─┬─ merge → reviewer → END
@@ -17,13 +19,26 @@ QA graph:
     START → dispatcher ─┬─ {branch}_retriever* ─┬─ merge → qa_responder → END
                ↓ (error)└─ ... ────────────────┘    ↓ (error)
               END                                    END
+
+用法:
+  阻塞: result = await run_contract_review(user_input="...", file_path="...")
+  流式: async for mode, data in _review_graph.astream(state, stream_mode="custom"):
+            yield data["token"]
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
+import uuid
+import logging
 
+import openai
+from openai import BadRequestError, AuthenticationError
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.config import get_config
 
 from graph.state import WorkflowState
 from graph.parser import parser_node
@@ -32,6 +47,58 @@ from graph.reviewer import reviewer_node
 from graph.qa_responder import qa_responder_node
 from retrieval.retriever import ContractRetriever, BRANCH_SPEC
 
+# ── Checkpointer（惰性初始化，由 server startup 触发）─────────────────
+
+_checkpointer: AsyncPostgresSaver | MemorySaver = MemorySaver()  # 默认内存，init 后切换
+_checkpointer_ctx = None  # PostgresSaver 的 context manager
+_review_graph = None
+_qa_graph = None
+
+# ── 重试配置 ────────────────────────────────────────────────────────────
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2.0
+
+logger = logging.getLogger(__name__)
+
+
+async def _ainvoke_with_retry(
+    graph, initial_state: dict, thread_id: str | None,
+    max_retries: int = _MAX_RETRIES,
+    configurable: dict | None = None,
+) -> dict:
+    """带 checkpoint 重试的异步图调用。
+
+    只有节点内部不 catch 的可恢复异常（Timeout / RateLimit 等）才会
+    从 graph.ainvoke() 向上抛，触发此处的重试。
+
+    configurable 可携带不变配置（file_path, rerank 等），
+    注入 config["configurable"] 供节点通过 get_config() 读取。
+    """
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id, **(configurable or {})}}
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await graph.ainvoke(initial_state, config)
+        except Exception:
+            if attempt == max_retries:
+                logger.error(
+                    f"图调用 {max_retries} 次全部失败 (thread={thread_id})"
+                )
+                raise
+            delay = min(_RETRY_BASE_DELAY ** attempt, 10)
+            logger.warning(
+                f"图调用失败 (attempt={attempt}/{max_retries}, thread={thread_id}), "
+                f"{delay:.0f}s 后重试..."
+            )
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("unreachable")
+
+
+# ── Retriever 单例 ──────────────────────────────────────────────────────
 
 _retriever: ContractRetriever | None = None
 _retriever_lock = threading.Lock()
@@ -50,16 +117,25 @@ def _get_retriever() -> ContractRetriever:
 
 def _make_retriever_node(branch_name: str):
     """工厂函数：为指定分支生成检索节点。
-    节点名 = "{branch_name}_retriever"，由 _build_retrieval_layer 注册。
+
+    错误处理：
+      - BadRequestError / AuthenticationError → 降级返回空（重试无意义）
+      - Timeout / RateLimit / ConnectionError / 5xx → 向上抛，checkpoint 恢复
+      - Chroma / 桥接等本地异常 → 降级返回空（重试修不好）
     """
     def _node(state: WorkflowState) -> dict:
         if branch_name not in state["branches"]:
             return {"branch_results": {branch_name: []}}
         try:
             r = _get_retriever()
-            rerank = state.get("rerank", True)
+            cfg = get_config()
+            rerank = cfg.get("configurable", {}).get("rerank", True)
             result = r.search_branch(branch_name, state["input"], rerank=rerank)
             return {"branch_results": {branch_name: result}}
+        except (BadRequestError, AuthenticationError):
+            return {"branch_results": {branch_name: []}}
+        except openai.APIError:
+            raise
         except Exception:
             return {"branch_results": {branch_name: []}}
     return _node
@@ -73,7 +149,6 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
         results = dict(state.get("branch_results", {}))
         branches = state.get("branches", [])
 
-        # 非致命警告：某分支应激活但无结果
         warnings: list[str] = []
         for bn in branches:
             items = results.get(bn, [])
@@ -81,7 +156,10 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
                 label = BRANCH_SPEC.get(bn, {}).get("label", bn)
                 warnings.append(f"⚠ {label}检索未返回结果")
 
-        rv = {"retrieval_result": assemble_branch_results(results, branches)}
+        rv: dict = {
+            "retrieval_result": assemble_branch_results(results, branches),
+            "branch_results": {},   # 清空原始检索结果，下游不需要，仅 checkpoint 有用
+        }
         if warnings:
             rv["warnings"] = warnings
         return rv
@@ -92,20 +170,18 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
 # ── Error routing ────────────────────────────────────────────────────────
 
 def _route_from_dispatcher(state: WorkflowState) -> str | list[str]:
-    """致命错误 → END；正常 → fan-out 到所有激活分支的检索节点。"""
     if state.get("error"):
         return END
     return [f"{b}_retriever" for b in state["branches"]]
 
 
 def _route_from_merge(state: WorkflowState) -> str:
-    """致命错误 → END。"""
     if state.get("error"):
         return END
     return "continue"
 
 
-# ── Shared retrieval layer (node names from BRANCH_SPEC) ─────────────────
+# ── Shared retrieval layer ───────────────────────────────────────────────
 
 def _build_retrieval_layer(builder: StateGraph) -> None:
     """从 BRANCH_SPEC 自动生成 retriever 节点 + 边。新增分支零改动。"""
@@ -118,7 +194,6 @@ def _build_retrieval_layer(builder: StateGraph) -> None:
         builder.add_edge(node_name, "merge_retrieval")
         route_map[node_name] = node_name
 
-    # dispatcher → fan-out（动态路由到激活分支）/ END
     builder.add_conditional_edges("dispatcher", _route_from_dispatcher, route_map)
 
 
@@ -139,49 +214,6 @@ _review_graph_builder.add_conditional_edges("merge_retrieval", _route_from_merge
 _review_graph_builder.add_edge("reviewer", END)
 _review_graph_builder.set_entry_point("parser")
 
-_review_graph = _review_graph_builder.compile()
-
-
-def _make_initial_state(user_input: str = "", file_path: str = "") -> WorkflowState:
-    return {
-        "input": user_input,
-        "file_path": file_path,
-        "contract_type": "",
-        "branches": [],
-        "branch_results": {},
-        "retrieval_result": {},
-        "review_output": "",
-        "error": "",
-        "warnings": [],
-        "rerank": True,
-    }
-
-
-def _make_error_return(err_msg: str, **extra) -> dict:
-    return {
-        "contract_type": "",
-        "branches": [],
-        "branch_results": {},
-        "retrieval_result": {},
-        "review_output": "",
-        "error": err_msg,
-        "warnings": [],
-        "rerank": True,
-        **extra,
-    }
-
-
-def run_contract_review(user_input: str = "", file_path: str = "") -> dict:
-    initial_state = _make_initial_state(user_input, file_path)
-    try:
-        result = _review_graph.invoke(initial_state)
-    except Exception as e:
-        return _make_error_return(
-            f"审查工作流异常: {e}",
-            input=user_input, file_path=file_path,
-        )
-    return result
-
 
 # ── Question Answering Graph ─────────────────────────────────────────────
 
@@ -198,19 +230,122 @@ _qa_graph_builder.add_conditional_edges("merge_retrieval", _route_from_merge, {
 _qa_graph_builder.add_edge("qa_responder", END)
 _qa_graph_builder.set_entry_point("dispatcher")
 
-_qa_graph = _qa_graph_builder.compile()
+
+# ── Lazy compilation ─────────────────────────────────────────────────────
+
+def _compile_graphs() -> None:
+    """用当前 checkpointer 编译两个图（init_checkpointer 时调用）。"""
+    global _review_graph, _qa_graph
+    _review_graph = _review_graph_builder.compile(checkpointer=_checkpointer)
+    _qa_graph = _qa_graph_builder.compile(checkpointer=_checkpointer)
 
 
-def run_qa(question: str) -> dict:
-    initial_state = _make_initial_state(question, "")
-    try:
-        result = _qa_graph.invoke(initial_state)
-    except Exception as e:
-        return _make_error_return(
-            f"咨询工作流异常: {e}",
-            input=question, file_path="",
-        )
-    return result
+async def init_checkpointer(postgres_url: str) -> None:
+    """初始化 PostgresSaver 并重新编译图。服务器启动时调用。"""
+    global _checkpointer, _checkpointer_ctx
+    _checkpointer_ctx = AsyncPostgresSaver.from_conn_string(postgres_url)
+    _checkpointer = await _checkpointer_ctx.__aenter__()
+    await _checkpointer.setup()
+    _compile_graphs()
+    logger.info("PostgresSaver 初始化完成，图已重新编译")
+
+
+async def close_checkpointer() -> None:
+    """关闭 PostgresSaver 连接。服务器关闭时调用。"""
+    global _checkpointer_ctx, _checkpointer
+    if _checkpointer_ctx:
+        await _checkpointer_ctx.__aexit__(None, None, None)
+        _checkpointer_ctx = None
+    _checkpointer = MemorySaver()
+    logger.info("PostgresSaver 已关闭")
+
+
+def get_review_graph():
+    """获取审查图（惰性编译保障）。"""
+    if _review_graph is None:
+        _compile_graphs()
+    return _review_graph
+
+
+def get_qa_graph():
+    """获取 QA 图（惰性编译保障）。"""
+    if _qa_graph is None:
+        _compile_graphs()
+    return _qa_graph
+
+
+# ── State helpers ────────────────────────────────────────────────────────
+
+def _make_initial_state(user_input: str = "") -> WorkflowState:
+    return {
+        "input": user_input,
+        "contract_type": "",
+        "branches": [],
+        "branch_results": {},
+        "retrieval_result": {},
+        "review_output": "",
+        "error": "",
+        "warnings": [],
+    }
+
+
+# ── 公共入口 ────────────────────────────────────────────────────────────
+
+async def run_contract_review(
+    user_input: str = "", file_path: str = "",
+    thread_id: str | None = None, max_retries: int = _MAX_RETRIES,
+) -> dict:
+    """运行合同审查工作流（阻塞）。"""
+    initial_state = _make_initial_state(user_input)
+    return await _ainvoke_with_retry(
+        _review_graph, initial_state, thread_id, max_retries,
+        configurable={"file_path": file_path, "rerank": True},
+    )
+
+
+async def run_qa(
+    question: str = "", thread_id: str | None = None,
+    max_retries: int = _MAX_RETRIES,
+) -> dict:
+    """运行 QA 工作流（阻塞）。"""
+    initial_state = _make_initial_state(question)
+    return await _ainvoke_with_retry(
+        _qa_graph, initial_state, thread_id, max_retries,
+        configurable={"rerank": True},
+    )
+
+
+def build_review_state(
+    user_input: str = "", file_path: str = "", thread_id: str | None = None,
+) -> tuple:
+    """构建审查初始状态和 config，供流式端点使用。"""
+    state = _make_initial_state(user_input)
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "file_path": file_path,
+            "rerank": True,
+        },
+    }
+    return state, config, thread_id
+
+
+def build_qa_state(
+    question: str = "", thread_id: str | None = None,
+) -> tuple:
+    """构建 QA 初始状态和 config，供流式端点使用。"""
+    state = _make_initial_state(question)
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "rerank": True,
+        },
+    }
+    return state, config, thread_id
 
 
 # ── CLI entry ────────────────────────────────────────────────────────────────
@@ -243,17 +378,20 @@ if __name__ == "__main__":
         print(f"解析文件: {file_path}")
     print("正在分析...\n")
 
-    if cli_args.qa:
-        result = run_qa(question=query)
-    else:
-        result = run_contract_review(user_input=query, file_path=file_path)
+    async def main():
+        if cli_args.qa:
+            result = await run_qa(question=query)
+        else:
+            result = await run_contract_review(user_input=query, file_path=file_path)
 
-    if result.get("error"):
-        print(f"[错误] {result['error']}")
-    else:
-        print(f"合同类型: {result['contract_type']}")
-        print(f"检索分支: {', '.join(result['branches'])}")
-        print()
-        print("-" * 60)
-        print(result["review_output"])
-        print("-" * 60)
+        if result.get("error"):
+            print(f"[错误] {result['error']}")
+        else:
+            print(f"合同类型: {result['contract_type']}")
+            print(f"检索分支: {', '.join(result['branches'])}")
+            print()
+            print("-" * 60)
+            print(result["review_output"])
+            print("-" * 60)
+
+    asyncio.run(main())

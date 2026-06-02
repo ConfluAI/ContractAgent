@@ -1,11 +1,17 @@
 """
 Reviewer node — LLM-powered contract review against retrieved legal basis.
 
-Takes the contract text/questions and assembled legal knowledge, produces a
-structured review with risk identification, amendment suggestions, and legal citations.
+单一节点，两种模式:
+  - invoke():   writer=None → 阻塞等待完整响应 → return {"review_output": text}
+  - astream():  writer 注入 → 逐 token 推送 → return {"review_output": full_text}
 """
 
-from config.models import get_client, model_name
+from typing import Optional
+
+from openai import BadRequestError, AuthenticationError
+from langgraph.config import get_stream_writer, get_config
+
+from config.models import get_async_client, model_name
 from graph.state import WorkflowState
 
 
@@ -20,7 +26,9 @@ REVIEWER_PROMPT = """你是一位资深合同法律师。请根据以下法律�
 法律适用原则：
 - 民法典是所有合同关系的母法与通用基础，任何合同类型都适用
 - 如提供了劳动法等专项法律条文，则专项法在对应领域优先适用（特别法优于一般法）
-- 专项法未规定的，仍参照民法典的通用规则
+- 专项法未规定的事项，参照民法典的通用规则（兜底补充）
+- 专项法中涉及的法律术语、法律关系、法理概念，若需要深入理解其含义，
+  应参考民法典中的相关基础规定（民法典提供了法律概念体系的底层框架）
 
 请按以下结构输出审查报告：
 
@@ -54,31 +62,82 @@ REVIEWER_SYSTEM = """你是一位资深合同法律师，擅长中国合同法�
 民法典是所有合同的基础法律依据，专项法（劳动法等）在对应领域优先适用。
 你的审查意见基于提供的法律条文，不编造不存在的条文。"""
 
+MAX_HISTORY_TURNS = 10
 
-def reviewer_node(state: WorkflowState) -> dict:
-    """基于检索结果进行合同审查。"""
+
+def _build_review_messages(
+    input_text: str,
+    legal_basis: str,
+    conversation_history: Optional[list[dict]] = None,
+) -> list[dict]:
+    """构建审查 LLM 的消息列表。可注入对话历史用于多轮追问。"""
+    messages = [{"role": "system", "content": REVIEWER_SYSTEM}]
+
+    if conversation_history:
+        truncated = conversation_history[-MAX_HISTORY_TURNS * 2:]
+        messages.extend(truncated)
+
+    messages.append({
+        "role": "user",
+        "content": REVIEWER_PROMPT.format(
+            input=input_text,
+            legal_basis=legal_basis,
+        ),
+    })
+    return messages
+
+
+# ── 统一节点（invoke / astream 共用）────────────────────────────────
+
+async def reviewer_node(state: WorkflowState) -> dict:
+    """合同审查节点。
+
+    通过 get_stream_writer() 判断模式：
+      - RuntimeError → 阻塞模式（ainvoke），等完整响应
+      - 拿到 writer → 流式模式（astream custom），逐 token 推送
+
+    错误处理：
+      - BadRequestError / AuthenticationError → 致命，设 error
+      - Timeout / RateLimit / 连接中断 → 向上抛，checkpoint 恢复
+    """
+    client = get_async_client()
+    model = model_name("review_llm")
+    legal_basis = state["retrieval_result"].get("assembled_text", "")
+    cfg = get_config()
+    conversation_history = cfg.get("configurable", {}).get("conversation_history")
+
+    # 判断运行模式
     try:
-        client = get_client()
-        model = model_name("review_llm")
+        writer = get_stream_writer()
+    except RuntimeError:
+        writer = None
 
-        legal_basis = state["retrieval_result"].get("assembled_text", "")
-
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": REVIEWER_SYSTEM},
-                {
-                    "role": "user",
-                    "content": REVIEWER_PROMPT.format(
-                        input=state["input"],
-                        legal_basis=legal_basis,
-                    ),
-                },
-            ],
-            temperature=0.3,
-        )
-
-        review_text = resp.choices[0].message.content.strip()
-        return {"review_output": review_text}
-    except Exception as e:
+    try:
+        if writer is None:
+            # ── 阻塞模式 ──
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=_build_review_messages(state["input"], legal_basis, conversation_history),
+                temperature=0.3,
+            )
+            review_text = resp.choices[0].message.content.strip()
+            return {"review_output": review_text, "retrieval_result": {}}
+        else:
+            # ── 流式模式 ──
+            stream = await client.chat.completions.create(
+                model=model,
+                messages=_build_review_messages(state["input"], legal_basis, conversation_history),
+                temperature=0.3,
+                stream=True,
+            )
+            full_text = ""
+            async for chunk in stream:
+                token = chunk.choices[0].delta.content or ""
+                if token:
+                    full_text += token
+                    writer({"token": token})
+            return {"review_output": full_text, "retrieval_result": {}}
+    except (BadRequestError, AuthenticationError) as e:
         return {"error": f"[合同审查] {e}"}
+    # Timeout / RateLimit / ConnectionError / InternalServerError
+    # 不捕获 → 向上抛给 LangGraph，checkpoint 保存后可重试

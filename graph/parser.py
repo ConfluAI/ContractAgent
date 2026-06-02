@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from langgraph.config import get_config
+
 from graph.state import WorkflowState
 
 
@@ -39,8 +41,9 @@ PARSERS = {
 
 
 def parser_node(state: WorkflowState) -> dict:
-    """Parse file if file_path is set, otherwise pass through."""
-    file_path = state.get("file_path", "")
+    """Parse file if file_path is in config, otherwise pass through."""
+    config = get_config()
+    file_path = config.get("configurable", {}).get("file_path", "")
     if not file_path:
         return {}
 

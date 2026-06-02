@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -5,13 +6,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.config import settings
 from server.database import init_db, engine
+from server.redis_client import close_redis
+from graph.workflow import init_checkpointer, close_checkpointer
+from server.services.checkpoint_cleanup import cleanup_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await init_checkpointer(settings.POSTGRES_URL)
+    # 后台定时清理过期 checkpoint（7 天 TTL）
+    _cleanup_task = asyncio.create_task(cleanup_loop())
     yield
+    _cleanup_task.cancel()
     await engine.dispose()
+    await close_redis()
+    await close_checkpointer()
 
 
 app = FastAPI(title="ContractAgent - 合同审查智能体", version="1.0.0", lifespan=lifespan)
@@ -24,12 +34,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from server.routers import auth, users, review, history  # noqa: E402
+from server.routers import auth, users, review, history, conversation  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(review.router)
 app.include_router(history.router)
+app.include_router(conversation.router)
 
 
 @app.get("/")

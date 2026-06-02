@@ -50,7 +50,7 @@
               @click="handleFileReview"
             >
               <el-icon><Search /></el-icon>
-              {{ reviewing ? "审查中..." : "开始审查" }}
+              {{ reviewing ? (streamPhase === 'retrieval' ? '检索中...' : '生成中...') : '开始审查' }}
             </el-button>
           </div>
         </el-card>
@@ -64,19 +64,24 @@
                 <el-icon><Notebook /></el-icon>
                 <span>审查报告</span>
               </div>
-              <el-tag v-if="reviewResult" type="success" size="small" effect="plain">
+              <el-tag v-if="streamPhase === 'generating'" type="warning" size="small" effect="plain">
+                生成中...
+              </el-tag>
+              <el-tag v-else-if="reviewResult && !reviewing" type="success" size="small" effect="plain">
                 审查完成
               </el-tag>
             </div>
           </template>
 
-          <div v-if="reviewing" class="loading-state">
+          <!-- 检索中 -->
+          <div v-if="streamPhase === 'retrieval'" class="loading-state">
             <el-icon :size="48" class="loading-icon"><Loading /></el-icon>
             <p>AI 正在分析合同并检索相关法律条文...</p>
-            <p class="loading-hint">这可能需要 10-30 秒</p>
+            <p class="loading-hint">这可能需要 5-15 秒</p>
           </div>
 
-          <template v-else-if="reviewResult">
+          <!-- 流式生成中 / 结果展示 -->
+          <template v-else-if="streamOutput || reviewResult">
             <el-alert
               v-for="(w, i) in warnings"
               :key="i"
@@ -86,9 +91,11 @@
               :closable="false"
               style="margin-bottom: 12px"
             />
-            <ReviewResult :output="reviewResult" />
+            <ReviewResult :output="streamOutput || reviewResult" />
+            <span v-if="streamPhase === 'generating'" class="cursor-blink">|</span>
           </template>
 
+          <!-- 空状态 -->
           <div v-else class="empty-state">
             <el-icon :size="64" color="#c0c4cc"><Document /></el-icon>
             <p>上传合同文件开始审查</p>
@@ -115,27 +122,28 @@
 
 <script setup>
 import { ref } from "vue";
-import { uploadFile } from "../api/review";
+import { uploadFileStream, uploadFile } from "../api/review";
 import { ElMessage } from "element-plus";
 import ReviewResult from "./ReviewResult.vue";
 
 const selectedFile = ref(null);
 const reviewing = ref(false);
 const reviewResult = ref("");
+const streamOutput = ref("");
+const streamPhase = ref(""); // '' | 'retrieval' | 'generating'
 const warnings = ref([]);
+const threadId = ref(null);
+
+let streamCtrl = null;
 
 function handleFileChange(file) {
   selectedFile.value = file.raw;
 }
 
-async function handleFileReview() {
-  if (!selectedFile.value) {
-    ElMessage.warning("请选择文件");
-    return;
-  }
+async function fallbackBlocking() {
+  if (!selectedFile.value) return;
   reviewing.value = true;
-  reviewResult.value = "";
-  warnings.value = [];
+  streamPhase.value = "";
   try {
     const { data } = await uploadFile(selectedFile.value);
     warnings.value = data.warnings || [];
@@ -145,9 +153,89 @@ async function handleFileReview() {
       reviewResult.value = data.review_output;
       ElMessage.success("审查完成");
     }
+  } catch (e) {
+    ElMessage.error("普通模式也失败了：" + (e.response?.data?.detail || e.message));
   } finally {
     reviewing.value = false;
   }
+}
+
+function newConversation() {
+  if (streamCtrl) {
+    streamCtrl.abort();
+    streamCtrl = null;
+  }
+  threadId.value = null;
+  resetState();
+}
+
+function resetState() {
+  if (streamCtrl) {
+    streamCtrl.abort();
+    streamCtrl = null;
+  }
+  reviewing.value = false;
+  streamPhase.value = "";
+  streamOutput.value = "";
+  reviewResult.value = "";
+  warnings.value = [];
+}
+
+async function handleFileReview() {
+  if (!selectedFile.value) {
+    ElMessage.warning("请选择文件");
+    return;
+  }
+
+  resetState();
+  reviewing.value = true;
+  streamPhase.value = "retrieval";
+
+  streamCtrl = uploadFileStream(selectedFile.value, threadId.value, {
+    onEvent(event, data) {
+      if (event === "retrieval_done") {
+        streamPhase.value = "generating";
+        warnings.value = data.warnings || [];
+      } else if (event === "retry") {
+        streamOutput.value = "";
+        ElMessage.warning(`连接中断，正在重试 (${data.attempt}/${data.max_retries})...`);
+      } else if (event === "token") {
+        streamOutput.value += data.token;
+      } else if (event === "done") {
+        reviewing.value = false;
+        streamPhase.value = "";
+        streamCtrl = null;
+        if (data.error) {
+          ElMessage.error(data.error);
+          if (streamOutput.value) {
+            reviewResult.value = streamOutput.value;
+          }
+        } else {
+          reviewResult.value = streamOutput.value || data.full_output;
+          if (data.thread_id) threadId.value = data.thread_id;
+          ElMessage.success("审查完成");
+        }
+      }
+    },
+    onError(err) {
+      streamCtrl = null;
+      if (streamOutput.value) {
+        reviewResult.value = streamOutput.value;
+        streamOutput.value = "";
+      }
+      // 兜底：切到阻塞 API
+      ElMessage.warning("流式连接中断，正在切换为普通模式...");
+      fallbackBlocking();
+    },
+    onComplete() {
+      reviewing.value = false;
+      streamPhase.value = "";
+      streamCtrl = null;
+      if (streamOutput.value) {
+        reviewResult.value = streamOutput.value;
+      }
+    },
+  });
 }
 </script>
 
@@ -289,5 +377,14 @@ async function handleFileReview() {
   gap: 8px;
   font-size: 13px;
   color: #67c23a;
+}
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+  color: #409eff;
+  font-weight: bold;
+  font-size: 18px;
+}
+@keyframes blink {
+  50% { opacity: 0; }
 }
 </style>
