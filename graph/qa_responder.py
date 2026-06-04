@@ -112,7 +112,7 @@ async def qa_responder_node(state: WorkflowState) -> dict:
                 temperature=0.3,
             )
             answer = resp.choices[0].message.content.strip()
-            return {"review_output": answer, "retrieval_result": {}}
+            return {"review_output": answer, "retrieval_result": state.get("retrieval_result", {})}
         else:
             stream = await client.chat.completions.create(
                 model=model,
@@ -126,7 +126,7 @@ async def qa_responder_node(state: WorkflowState) -> dict:
                 if token:
                     full_text += token
                     writer({"token": token})
-            return {"review_output": full_text, "retrieval_result": {}}
+            return {"review_output": full_text, "retrieval_result": state.get("retrieval_result", {})}
     except (BadRequestError, AuthenticationError) as e:
         return Command(goto=END, update={"error": f"[法律咨询] {e}"})
     # Timeout / RateLimit / ConnectionError / InternalServerError

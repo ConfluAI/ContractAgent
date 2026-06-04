@@ -123,7 +123,7 @@ async def reviewer_node(state: WorkflowState) -> dict:
                 temperature=0.3,
             )
             review_text = resp.choices[0].message.content.strip()
-            return {"review_output": review_text, "retrieval_result": {}}
+            return {"review_output": review_text, "retrieval_result": state.get("retrieval_result", {})}
         else:
             # ── 流式模式 ──
             stream = await client.chat.completions.create(
@@ -138,7 +138,7 @@ async def reviewer_node(state: WorkflowState) -> dict:
                 if token:
                     full_text += token
                     writer({"token": token})
-            return {"review_output": full_text, "retrieval_result": {}}
+            return {"review_output": full_text, "retrieval_result": state.get("retrieval_result", {})}
     except (BadRequestError, AuthenticationError) as e:
         return Command(goto=END, update={"error": f"[合同审查] {e}"})
     # Timeout / RateLimit / ConnectionError / InternalServerError

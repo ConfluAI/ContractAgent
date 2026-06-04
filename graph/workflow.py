@@ -145,18 +145,23 @@ def _make_retriever_node(branch_name: str):
     """
     def _node(state: WorkflowState) -> dict:
         if branch_name not in state["branches"]:
+            logger.warning("分支 [%s] 不在 branches=%s 中，跳过", branch_name, state["branches"])
             return {"branch_results": {branch_name: []}}
         try:
             r = _get_retriever()
             cfg = get_config()
             rerank = cfg.get("configurable", {}).get("rerank", True)
+            logger.info("分支 [%s] 开始检索, query=%.80s, rerank=%s", branch_name, state["input"], rerank)
             result = r.search_branch(branch_name, state["input"], rerank=rerank)
+            logger.info("分支 [%s] 检索完成, 返回 %d 条", branch_name, len(result))
             return {"branch_results": {branch_name: result}}
-        except (BadRequestError, AuthenticationError):
+        except (BadRequestError, AuthenticationError) as e:
+            logger.warning("分支 [%s] 模型配置异常，降级返回空: %s", branch_name, e)
             return {"branch_results": {branch_name: []}}
         except openai.APIError:
             raise
-        except Exception:
+        except Exception as e:
+            logger.warning("分支 [%s] 检索异常，降级返回空: %s", branch_name, e)
             return {"branch_results": {branch_name: []}}
     return _node
 
@@ -169,6 +174,9 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
         results = dict(state.get("branch_results", {}))
         branches = state.get("branches", [])
 
+        logger.info("merge 节点: 收到 branch_results keys=%s, branches=%s",
+                     list(results.keys()), branches)
+
         warnings: list[str] = []
         for bn in branches:
             items = results.get(bn, [])
@@ -180,6 +188,10 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
             "retrieval_result": assemble_branch_results(results, branches),
             "branch_results": {},   # 清空原始检索结果，下游不需要，仅 checkpoint 有用
         }
+        logger.info("merge 节点返回: assembled_text=%d字, civil=%d条, labor=%d条",
+                     len(rv["retrieval_result"].get("assembled_text", "")),
+                     len(rv["retrieval_result"].get("civil", [])),
+                     len(rv["retrieval_result"].get("labor", [])))
         if warnings:
             rv["warnings"] = warnings
         return rv

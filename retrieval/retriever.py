@@ -7,14 +7,12 @@
   1. 调用方指定 branches=["civil", "labor"]
   2. 各分支间并行（ThreadPoolExecutor）
   3. 分支内部多路向量检索并行
-  4. 桥接补全 → 向量预截断(Top N) → LLM Rerank
-  5. QA 模式可跳过 Rerank，向量排序直接输出
+  4. 桥接补全 → BGE Rerank（专用 cross-encoder，~100ms）
+  5. QA 模式可跳过 Rerank，来源优先级排序直接输出
 """
 
 from __future__ import annotations
 
-import json
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -22,7 +20,6 @@ from typing import Any
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
-from config.models import get_client, model_name
 from retrieval.loaders import load_bridge
 from retrieval.embeddings import SiliconFlowEmbeddings
 
@@ -236,132 +233,84 @@ def _dedup_pairs(pairs: list[dict]) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# LLM 重排序
+# BGE 专用重排序（替换 LLM Rerank，延迟 ~100ms）
 # ═══════════════════════════════════════════════════════════════════════════
 
-RERANK_PROMPT = """你是一位资深法官助理。请从以下法条-解释知识单元中，筛选并排序与审查问题最相关的条目。
 
-审查问题：{query}
-
-评分规则（严格区分，避免分数扎堆）：
-
-适用性 (1-5):
-  5 = 条文直接规定了问题的核心法律要件
-  4 = 条文与问题高度相关，但并非核心条款
-  3 = 条文在适用范围内，但需要推理才能关联
-  2 = 条文主题相关，但并非解决该问题的直接依据
-  1 = 条文与问题无关或仅字面沾边
-
-完整性 (1-5):
-  5 = 法条+解释提供了可直接操作的审查步骤/标准
-  4 = 提供了较充分的依据，但缺少部分细节
-  3 = 提供了原则性依据，需结合其他条文才能操作
-  2 = 仅提供了概念性参考
-  1 = 无法作为审查依据
-
-互补性 (1-5):
-  5 = 解释精确补充了法条中未明确的审查要点
-  3 = 解释与法条有关联但未形成有效补充
-  1 = 无解释配对（孤儿），或解释与法条无实质互补
-
-每个单元的 total 应为 applicability+completeness+complementarity 之和。
-各单元之间总分应有明显梯度，不得出现 3 个以上单元同分。
-
-独立条文（无配对解释/条例的单行法条）：
-- 互补性固定为 1（因为没有下位法配对）
-- 此类条文的判定核心是适用性：它是否直接规定了问题的法律要件。
-  互补性低是结构原因，不是条文质量差，不应因此压低 total 排名。
-- 若适用性 >= 4，应标记 RELEVANT 并给较高的 total（建议 8-12）
-- 若适用性 <= 3，标记 IRRELEVANT
-- 特别注意：独立条文（如劳动法、劳动合同法）与有配对的条文平等竞争，
-  不能因为缺少解释而系统性排在后面
-
-输出 JSON 数组，按 total 降序排列。只输出 unit/total/verdict，不要输出子分和理由：
-[
-  {{
-    "unit": "A",
-    "total": 10,
-    "verdict": "RELEVANT"
-  }}
-]
-
-{knowledge_blocks}"""
-
-
-def _llm_rerank(query: str, blocks: list[str]) -> list[dict]:
-    client = get_client()
-    model = model_name("review_llm")
-    blocks_text = "\n\n".join(blocks)
-
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "你是一位资深法官助理。只输出 JSON 数组，不要输出其他内容。",
-            },
-            {
-                "role": "user",
-                "content": RERANK_PROMPT.format(
-                    query=query, knowledge_blocks=blocks_text
-                ),
-            },
-        ],
-        temperature=0,
-    )
-
-    raw = resp.choices[0].message.content.strip()
-    # 去掉 ```json ... ``` 包裹
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    match = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not match:
-        raise ValueError(f"LLM 未返回 JSON 数组: {raw[:200]}")
-    return json.loads(match.group())
-
-
-def _merge_scores(
-    scores: list[dict], pairs: list[dict], blocks: list[str]
+def _bge_rerank(
+    query: str,
+    blocks: list[str],
+    pairs: list[dict],
+    top_n: int | None = None,
+    threshold: float = 0.5,
 ) -> list[dict]:
-    """合并 Rerank 分数，只保留 RELEVANT 的结果。"""
+    """BGE-Reranker cross-encoder 重排序。
+
+    所有候选送进 reranker（不再预截断），按 relevance_score 降序返回。
+    relevance_score < threshold 的被过滤（BGE 能区分 0.02 vs 0.95，
+    低分对应明显不相关的条文，不应送给下游 LLM）。
+    桥接保证知识块完整，reranker 保证排序精准——
+    各司其职，不需要 LLM 做三维打分。
+    """
+    from config.models import rerank as call_rerank
+
+    scores = call_rerank(query, blocks, top_n=top_n)
+
     merged = []
     for s in scores:
-        idx = ord(s["unit"]) - 65
-        if 0 <= idx < len(pairs) and s.get("verdict") == "RELEVANT":
-            merged.append({**s, "pair": pairs[idx], "block_text": blocks[idx]})
-    # 兜底：全被标为 IRRELEVANT 时，最多保留 1 条避免完全空白
-    if not merged and scores:
-        s = scores[0]
-        idx = ord(s["unit"]) - 65
+        idx = s["index"]
+        if 0 <= idx < len(pairs) and s["relevance_score"] >= threshold:
+            merged.append({
+                "relevance_score": s["relevance_score"],
+                "total": round(s["relevance_score"], 3),
+                "verdict": "RELEVANT",
+                "pair": pairs[idx],
+                "block_text": blocks[idx],
+            })
+        elif 0 <= idx < len(pairs):
+            merged.append({
+                "relevance_score": s["relevance_score"],
+                "total": round(s["relevance_score"], 3),
+                "verdict": "IRRELEVANT",
+                "pair": pairs[idx],
+                "block_text": blocks[idx],
+            })
+
+    # 兜底：全被过滤时保留最高分的 1 条，避免下游空白
+    if not any(m["verdict"] == "RELEVANT" for m in merged) and scores:
+        best = scores[0]
+        idx = best["index"]
         if 0 <= idx < len(pairs):
-            merged.append({**s, "pair": pairs[idx], "block_text": blocks[idx]})
-    merged.sort(key=lambda x: -x["total"])
-    return merged
+            merged.append({
+                "relevance_score": best["relevance_score"],
+                "total": round(best["relevance_score"], 3),
+                "verdict": "RELEVANT",
+                "pair": pairs[idx],
+                "block_text": blocks[idx],
+            })
 
-
-def _vector_sort(pairs: list[dict]) -> list[dict]:
-    """向量相似度简易排序：直接命中 > 桥接补全 > 孤儿。无 LLM 调用。
-    只保留 RELEVANT，兜底保留 top 3。"""
-    order = {"direct": 0, "bridged": 1, "orphan": 2}
-    scored = []
-    for p in pairs:
-        source = p.pop("_source", "bridged")
-        rank = order.get(source, 1)
-        applicability = 4 if source == "direct" else 3 if source == "bridged" else 2
-        scored.append({
-            "applicability": applicability,
-            "completeness": 3,
-            "complementarity": 3 if p["secondary"] else 1,
-            "total": applicability + 3 + (3 if p["secondary"] else 1),
-            "reason": "向量相似度排序（QA 模式）",
-            "verdict": "RELEVANT" if applicability >= 3 else "IRRELEVANT",
-            "pair": p,
-        })
-    scored.sort(key=lambda x: -x["total"])
-    relevant = [s for s in scored if s["verdict"] == "RELEVANT"]
-    if not relevant and scored:
-        relevant = scored[:1]
+    # 只返回 RELEVANT，按分数降序（IRRELEVANT 不送下游）
+    relevant = [m for m in merged if m["verdict"] == "RELEVANT"]
+    relevant.sort(key=lambda x: -x["total"])
     return relevant
+
+
+def _simple_sort(pairs: list[dict], blocks: list[str]) -> list[dict]:
+    """无 Rerank 时的简易排序：直接命中 > 桥接补全 > 孤儿。"""
+    order = {"direct": 0, "bridged": 1, "orphan": 2}
+    results = []
+    for i, p in enumerate(pairs):
+        source = p.get("_source", "bridged")
+        rank = order.get(source, 1)
+        results.append({
+            "relevance_score": 0.0,
+            "total": 10 - rank * 3,  # direct=10, bridged=7, orphan=4
+            "verdict": "RELEVANT",
+            "pair": p,
+            "block_text": blocks[i] if i < len(blocks) else "",
+        })
+    results.sort(key=lambda x: -x["total"])
+    return results
 
 
 def _build_cache(store: Chroma) -> dict[int, Document]:
@@ -464,7 +413,7 @@ class ContractRetriever:
           branch_name: 分支名 ("civil" / "labor" / ...)
           query: 用户问题
           k_multiplier: 向量召回放大倍数
-          rerank: True=LLM Rerank, False=向量排序（QA 模式，快）
+          rerank: True=BGE Rerank, False=来源优先级排序（QA 模式，快）
         """
         spec = BRANCH_SPEC[branch_name]
 
@@ -523,29 +472,26 @@ class ContractRetriever:
 
         all_pairs = _dedup_pairs(all_pairs)
 
-        # ── 第 3 步：预截断（减少送给 LLM 的块数）──
-        max_blocks = spec.get("max_rerank_blocks", 6)
-        if len(all_pairs) > max_blocks:
-            # 直接命中 > 桥接补全 > 孤儿
-            order = {"direct": 0, "bridged": 1, "orphan": 2}
-            all_pairs.sort(key=lambda p: order.get(p.get("_source", "bridged"), 1))
-            all_pairs = all_pairs[:max_blocks]
-
-        # ── 第 4 步：排序（LLM Rerank 或 向量排序）──
+        # ── 第 3 步：排序（BGE Rerank 或 来源优先级排序）──
         blocks = [_assemble_block(p, i) for i, p in enumerate(all_pairs)]
-        # 清理 _source（不给 LLM 看到内部标记）
+
+        if rerank and blocks:
+            # BGE Rerank：所有候选送进 cross-encoder，按 relevance_score 降序返回
+            # 不再预截断 — reranker 本身高效，候选越多排序越准
+            results = _bge_rerank(
+                query, blocks, all_pairs,
+                top_n=spec.get("max_rerank_blocks", 5),
+            )
+        elif rerank:
+            results = []  # 无候选
+        else:
+            results = _simple_sort(all_pairs, blocks)
+
+        # 清理内部标记
         for p in all_pairs:
             p.pop("_source", None)
 
-        if rerank:
-            scores = _llm_rerank(query, blocks)
-            return _merge_scores(scores, all_pairs, blocks)
-        else:
-            scored = _vector_sort(all_pairs)
-            for i, s in enumerate(scored):
-                if i < len(blocks):
-                    s["block_text"] = blocks[i]
-            return scored
+        return results
 
     # ── 多分支并行入口 ────────────────────────────────────────────────
 
@@ -562,7 +508,7 @@ class ContractRetriever:
           query: 用户问题或合同片段
           branches: 激活的分支列表，默认 ["civil"]
           top_k: 分支名 → 保留条数
-          rerank: QA 模式可传 False 跳过 LLM Rerank
+          rerank: QA 模式可传 False 跳过 Rerank
         """
         if branches is None:
             branches = ["civil"]
