@@ -119,12 +119,24 @@ def rerank(query: str, documents: list[str], top_n: int | None = None) -> list[d
     return resp.json()["results"]
 
 
-def warmup_rerank() -> None:
-    """预热 rerank 连接池 — 服务启动时调用，消除首次请求的 TCP+TLS 握手延迟。"""
+def warmup_all() -> None:
+    """预热所有硅基流动连接池 — 服务启动时调用，消除首次请求的 TCP+TLS 握手延迟。"""
     import logging
     logger = logging.getLogger(__name__)
+
+    # 1. 预热 rerank 连接池（独立 httpx.Client）
     try:
         rerank("warmup", ["预热连接池"], top_n=1)
         logger.info("Rerank 连接池预热完成")
     except Exception as e:
         logger.warning("Rerank 预热失败（不影响正常使用）: %s", e)
+
+    # 2. 预热 Embedding/LLM 连接池（共用 OpenAI 客户端）
+    try:
+        client = get_client()
+        client.embeddings.create(
+            model=MODELS["embedding"], input="预热"
+        )
+        logger.info("Embedding/LLM 连接池预热完成")
+    except Exception as e:
+        logger.warning("Embedding/LLM 预热失败（不影响正常使用）: %s", e)

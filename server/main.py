@@ -8,7 +8,7 @@ from server.config import settings
 from server.database import init_db, engine
 from server.redis_client import close_redis
 from graph.workflow import init_checkpointer, close_checkpointer
-from config.models import warmup_rerank
+from config.models import warmup_all
 from server.services.checkpoint_cleanup import cleanup_loop
 
 
@@ -16,8 +16,8 @@ from server.services.checkpoint_cleanup import cleanup_loop
 async def lifespan(app: FastAPI):
     await init_db()
     await init_checkpointer(settings.POSTGRES_URL)
-    # 预热 rerank HTTP 连接池，消除首次检索的 TCP+TLS 握手延迟 (~1s)
-    await asyncio.to_thread(warmup_rerank)
+    # 预热所有硅基流动 HTTP 连接池（rerank + embedding + LLM），消除首次请求冷启动
+    await asyncio.to_thread(warmup_all)
     # 后台定时清理过期 checkpoint（7 天 TTL）
     _cleanup_task = asyncio.create_task(cleanup_loop())
     yield
