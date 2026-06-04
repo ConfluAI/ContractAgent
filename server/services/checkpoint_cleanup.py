@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from server.config import settings
-from server.database import AsyncSessionLocal
+from server.database import async_session
 from server.models.conversation_thread import ConversationThread
 from graph.workflow import get_review_graph
 
@@ -32,7 +32,7 @@ async def _run_cleanup() -> int:
     )
 
     # 1. 从 MySQL 查出过期的 thread_id
-    async with AsyncSessionLocal() as db:
+    async with async_session() as db:
         result = await db.execute(
             select(ConversationThread.id).where(
                 ConversationThread.updated_at < cutoff

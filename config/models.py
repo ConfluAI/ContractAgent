@@ -8,8 +8,13 @@ import os
 from typing import Optional
 from dotenv import load_dotenv
 from openai import OpenAI, AsyncOpenAI
+from langsmith import wrappers
 
 load_dotenv()
+
+# ── Prompt 版本（改提示词时递增，LangSmith 中按版本对比耗时/Token）───────
+
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "v1")
 
 # ── 模型映射 ──────────────────────────────────────────────────────────
 
@@ -20,7 +25,7 @@ MODELS = {
     "review_llm": "deepseek-ai/DeepSeek-V3",
 }
 
-# ── 客户端（单例）─────────────────────────────────────────────────────
+# ── 客户端（单例，wrap_openai 使 LangSmith 自动采集 LLM Token/耗时）──
 
 _client: Optional[OpenAI] = None
 _async_client: Optional[AsyncOpenAI] = None
@@ -30,11 +35,13 @@ def get_client() -> OpenAI:
     """同步 OpenAI 客户端 — 阻塞端点使用。"""
     global _client
     if _client is None:
-        _client = OpenAI(
-            api_key=os.environ["SILICONFLOW_API_KEY"],
-            base_url=os.environ.get(
-                "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
-            ),
+        _client = wrappers.wrap_openai(
+            OpenAI(
+                api_key=os.environ["SILICONFLOW_API_KEY"],
+                base_url=os.environ.get(
+                    "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+                ),
+            )
         )
     return _client
 
@@ -43,11 +50,13 @@ def get_async_client() -> AsyncOpenAI:
     """异步 OpenAI 客户端 — SSE 流式端点使用。"""
     global _async_client
     if _async_client is None:
-        _async_client = AsyncOpenAI(
-            api_key=os.environ["SILICONFLOW_API_KEY"],
-            base_url=os.environ.get(
-                "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
-            ),
+        _async_client = wrappers.wrap_openai(
+            AsyncOpenAI(
+                api_key=os.environ["SILICONFLOW_API_KEY"],
+                base_url=os.environ.get(
+                    "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+                ),
+            )
         )
     return _async_client
 

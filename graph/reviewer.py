@@ -10,6 +10,8 @@ from typing import Optional
 
 from openai import BadRequestError, AuthenticationError
 from langgraph.config import get_stream_writer, get_config
+from langgraph.types import Command
+from langgraph.constants import END
 
 from config.models import get_async_client, model_name
 from graph.state import WorkflowState
@@ -138,6 +140,6 @@ async def reviewer_node(state: WorkflowState) -> dict:
                     writer({"token": token})
             return {"review_output": full_text, "retrieval_result": {}}
     except (BadRequestError, AuthenticationError) as e:
-        return {"error": f"[合同审查] {e}"}
+        return Command(goto=END, update={"error": f"[合同审查] {e}"})
     # Timeout / RateLimit / ConnectionError / InternalServerError
     # 不捕获 → 向上抛给 LangGraph，checkpoint 保存后可重试

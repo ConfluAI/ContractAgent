@@ -2,6 +2,8 @@
 File parser node — converts docx/pdf files to plain text for downstream processing.
 
 Pass-through: if no file_path, the node simply returns unchanged state.
+
+致命错误（格式不支持、文件损坏）→ Command(goto=END)，跳过下游所有节点。
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from langgraph.config import get_config
+from langgraph.types import Command
+from langgraph.constants import END
 
 from graph.state import WorkflowState
 
@@ -50,10 +54,10 @@ def parser_node(state: WorkflowState) -> dict:
     suffix = Path(file_path).suffix.lower()
     parser = PARSERS.get(suffix)
     if parser is None:
-        return {"error": f"不支持的文件格式: {suffix}，支持: {', '.join(PARSERS)}"}
+        return Command(goto=END, update={"error": f"不支持的文件格式: {suffix}，支持: {', '.join(PARSERS)}"})
 
     try:
         text = parser(file_path)
         return {"input": text}
     except Exception as e:
-        return {"error": f"文件解析失败: {e}"}
+        return Command(goto=END, update={"error": f"文件解析失败: {e}"})

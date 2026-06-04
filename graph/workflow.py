@@ -34,11 +34,15 @@ import uuid
 import logging
 
 import openai
-from openai import BadRequestError, AuthenticationError
+from openai import (
+    BadRequestError, AuthenticationError,
+    APITimeoutError, RateLimitError, APIConnectionError, InternalServerError,
+)
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_config
+from langgraph.types import Command, RetryPolicy
 
 from graph.state import WorkflowState
 from graph.parser import parser_node
@@ -46,6 +50,7 @@ from graph.dispatcher import dispatcher_node
 from graph.reviewer import reviewer_node
 from graph.qa_responder import qa_responder_node
 from retrieval.retriever import ContractRetriever, BRANCH_SPEC
+from config.models import PROMPT_VERSION
 
 # ── Checkpointer（惰性初始化，由 server startup 触发）─────────────────
 
@@ -59,6 +64,15 @@ _qa_graph = None
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 2.0
 
+# ── RetryPolicy 配置（节点级重试，由 LangGraph 框架执行）─────────────────
+
+# 可恢复的 OpenAI 异常 — 网络闪断 / 限流 / 服务端 5xx → 重试
+_RETRY_ON_LLM = (
+    APITimeoutError, RateLimitError, APIConnectionError, InternalServerError,
+)
+# dispatcher 额外重试 ValueError — LLM 返回非 JSON 时换一次输出可能成功
+_RETRY_ON_DISPATCHER = (*_RETRY_ON_LLM, ValueError)
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +80,7 @@ async def _ainvoke_with_retry(
     graph, initial_state: dict, thread_id: str | None,
     max_retries: int = _MAX_RETRIES,
     configurable: dict | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     """带 checkpoint 重试的异步图调用。
 
@@ -77,7 +92,12 @@ async def _ainvoke_with_retry(
     """
     if thread_id is None:
         thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id, **(configurable or {})}}
+    config = {
+        "configurable": {"thread_id": thread_id, **(configurable or {})},
+    }
+    # 注入 LangSmith 元数据（prompt 版本、图类型）
+    if metadata:
+        config["metadata"] = metadata
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -164,18 +184,19 @@ def _merge_retrieval_node(state: WorkflowState) -> dict:
             rv["warnings"] = warnings
         return rv
     except Exception as e:
-        return {"error": f"[检索汇聚] {e}"}
+        return Command(goto=END, update={"error": f"[检索汇聚] {e}"})
 
 
 # ── Error routing ────────────────────────────────────────────────────────
 
 def _route_from_dispatcher(state: WorkflowState) -> str | list[str]:
-    if state.get("error"):
-        return END
+    # fatal error 由 Command(goto=END) 处理，不会走到此路由函数
     return [f"{b}_retriever" for b in state["branches"]]
 
 
 def _route_from_merge(state: WorkflowState) -> str:
+    # 正常路径：fatal error 由 Command(goto=END) 处理。
+    # 此检查为防御性：若未来有人直接 return {"error": ...} 而未用 Command，仍能终止。
     if state.get("error"):
         return END
     return "continue"
@@ -190,7 +211,10 @@ def _build_retrieval_layer(builder: StateGraph) -> None:
     route_map: dict[str, str] = {END: END}
     for branch_name in BRANCH_SPEC:
         node_name = f"{branch_name}_retriever"
-        builder.add_node(node_name, _make_retriever_node(branch_name))
+        builder.add_node(
+            node_name, _make_retriever_node(branch_name),
+            retry_policy=RetryPolicy(retry_on=_RETRY_ON_LLM, max_attempts=3),
+        )
         builder.add_edge(node_name, "merge_retrieval")
         route_map[node_name] = node_name
 
@@ -202,7 +226,10 @@ def _build_retrieval_layer(builder: StateGraph) -> None:
 _review_graph_builder = StateGraph(WorkflowState)
 
 _review_graph_builder.add_node("parser", parser_node)
-_review_graph_builder.add_node("dispatcher", dispatcher_node)
+_review_graph_builder.add_node(
+    "dispatcher", dispatcher_node,
+    retry_policy=RetryPolicy(retry_on=_RETRY_ON_DISPATCHER, max_attempts=3),
+)
 _build_retrieval_layer(_review_graph_builder)
 _review_graph_builder.add_node("reviewer", reviewer_node)
 
@@ -219,7 +246,10 @@ _review_graph_builder.set_entry_point("parser")
 
 _qa_graph_builder = StateGraph(WorkflowState)
 
-_qa_graph_builder.add_node("dispatcher", dispatcher_node)
+_qa_graph_builder.add_node(
+    "dispatcher", dispatcher_node,
+    retry_policy=RetryPolicy(retry_on=_RETRY_ON_DISPATCHER, max_attempts=3),
+)
 _build_retrieval_layer(_qa_graph_builder)
 _qa_graph_builder.add_node("qa_responder", qa_responder_node)
 
@@ -298,8 +328,9 @@ async def run_contract_review(
     """运行合同审查工作流（阻塞）。"""
     initial_state = _make_initial_state(user_input)
     return await _ainvoke_with_retry(
-        _review_graph, initial_state, thread_id, max_retries,
+        get_review_graph(), initial_state, thread_id, max_retries,
         configurable={"file_path": file_path, "rerank": True},
+        metadata={"prompt_version": PROMPT_VERSION, "graph": "review"},
     )
 
 
@@ -310,8 +341,9 @@ async def run_qa(
     """运行 QA 工作流（阻塞）。"""
     initial_state = _make_initial_state(question)
     return await _ainvoke_with_retry(
-        _qa_graph, initial_state, thread_id, max_retries,
+        get_qa_graph(), initial_state, thread_id, max_retries,
         configurable={"rerank": True},
+        metadata={"prompt_version": PROMPT_VERSION, "graph": "qa"},
     )
 
 
@@ -328,6 +360,7 @@ def build_review_state(
             "file_path": file_path,
             "rerank": True,
         },
+        "metadata": {"prompt_version": PROMPT_VERSION, "graph": "review"},
     }
     return state, config, thread_id
 
@@ -344,6 +377,7 @@ def build_qa_state(
             "thread_id": thread_id,
             "rerank": True,
         },
+        "metadata": {"prompt_version": PROMPT_VERSION, "graph": "qa"},
     }
     return state, config, thread_id
 

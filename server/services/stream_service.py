@@ -82,7 +82,6 @@ async def _stream_graph(
       {"event": "done", "data": {...}}
     """
     retrieval_done = False
-    final_state = None
 
     for attempt in range(1, _STREAM_MAX_RETRIES + 1):
         try:
@@ -90,7 +89,6 @@ async def _stream_graph(
                 state, config, stream_mode=["custom", "updates"]
             ):
                 if mode == "updates":
-                    final_state = data
                     if not retrieval_done and "merge_retrieval" in data:
                         retrieval_done = True
                         merge_data = data["merge_retrieval"]
@@ -144,12 +142,12 @@ async def _stream_graph(
     # PostgresSaver 保留 checkpoint（7 天 TTL 由定时清理任务处理，见 CHECKPOINT_RETENTION_DAYS）
     thread_id = config["configurable"]["thread_id"]
 
-    error_msg = ""
-    if isinstance(final_state, dict):
-        for node_name, node_data in final_state.items():
-            if node_data.get("error"):
-                error_msg = node_data["error"]
-                break
+    # 从 checkpointer 获取权威最终状态（比遍历 astream updates 增量更可靠，
+    # 且与 Command / RetryPolicy 机制兼容）
+    snapshot = await graph.aget_state(config)
+    final_values = snapshot.values if snapshot else {}
+
+    error_msg = final_values.get("error", "")
 
     yield {
         "event": "done",
@@ -158,7 +156,8 @@ async def _stream_graph(
             "thread_id": thread_id,
             "full_output": "",
             "error": error_msg,
-            "_final_state": final_state,
+            "warnings": final_values.get("warnings", []),
+            "review_output": final_values.get("review_output", ""),
         },
     }
 
@@ -178,6 +177,9 @@ async def stream_review(
     ) if thread_id and db and user_id else ([], None, [])
 
     state, config, actual_thread_id = build_review_state(user_input, file_path, thread_id)
+
+    # 注入业务元数据供 LangSmith 筛选
+    config.setdefault("metadata", {})["thread_id"] = actual_thread_id
 
     # 对话历史注入 configurable（不进 checkpoint），reviewer 通过 get_config() 读取
     if conversation_history:
@@ -257,6 +259,7 @@ async def stream_qa(
     ) if thread_id and db and user_id else ([], None, [])
 
     state, config, actual_thread_id = build_qa_state(user_input, thread_id)
+    config.setdefault("metadata", {})["thread_id"] = actual_thread_id
     if conversation_history:
         config["configurable"]["conversation_history"] = conversation_history
 

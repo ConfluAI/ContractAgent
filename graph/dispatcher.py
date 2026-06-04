@@ -10,6 +10,8 @@ import json
 import re
 
 from openai import BadRequestError, AuthenticationError
+from langgraph.types import Command
+from langgraph.constants import END
 
 from config.models import get_client, model_name
 from graph.state import WorkflowState
@@ -77,13 +79,10 @@ def dispatcher_node(state: WorkflowState) -> dict:
     """决定激活哪些专项分支。civil 永远激活，无需判断。
 
     错误处理：
-      - BadRequestError / AuthenticationError → 致命，设 error 终止图
+      - BadRequestError / AuthenticationError → 致命，Command(goto=END) 终止图
       - Timeout / RateLimit / 连接中断 / JSON 解析失败等 → 向上抛，
-        LangGraph checkpoint 保存后可用相同 thread_id 重试
+        RetryPolicy 或调用方重试循环接管
     """
-    if state.get("error"):
-        return {}
-
     text = state["input"]
     try:
         # 1. 关键词快速通道（命中直接激活，不走 LLM）
@@ -102,7 +101,6 @@ def dispatcher_node(state: WorkflowState) -> dict:
             "branches": ["civil"] + extra,
         }
     except (BadRequestError, AuthenticationError) as e:
-        # 模型配置错 / API Key 无效 → 重试无意义
-        return {"error": f"[合同分类] {e}"}
+        return Command(goto=END, update={"error": f"[合同分类] {e}"})
     # Timeout / RateLimit / ConnectionError / InternalServerError /
-    # ValueError（LLM 返回非 JSON）→ 向上抛，checkpoint 恢复后重试
+    # ValueError（LLM 返回非 JSON）→ 向上抛，RetryPolicy 或调用方重试
