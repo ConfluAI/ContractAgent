@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 import os
 import uuid
@@ -183,25 +184,30 @@ async def upload_stream(
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     temp_path = os.path.join(settings.UPLOAD_DIR, f"{uuid.uuid4()}{suffix}")
 
-    try:
-        content = await file.read()
-        with open(temp_path, "wb") as f:
-            f.write(content)
-        return StreamingResponse(
-            _sse_wrap(stream_review(
+    content = await file.read()
+    with open(temp_path, "wb") as f:
+        f.write(content)
+
+    async def _cleanup_wrapper():
+        try:
+            async for event in stream_review(
                 user_input="",
                 file_path=temp_path,
                 user_id=current_user.id,
                 db=db,
                 thread_id=thread_id,
-            )),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    finally:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
+            ):
+                yield event
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    return StreamingResponse(
+        _sse_wrap(_cleanup_wrapper()),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
