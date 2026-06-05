@@ -8,11 +8,12 @@ Pass-through: if no file_path, the node simply returns unchanged state.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
-from langgraph.config import get_config
 from langgraph.types import Command
 from langgraph.constants import END
+from langchain_core.runnables import RunnableConfig
 
 from graph.state import WorkflowState
 
@@ -44,9 +45,8 @@ PARSERS = {
 }
 
 
-def parser_node(state: WorkflowState) -> dict:
+async def parser_node(state: WorkflowState, config: RunnableConfig) -> dict:
     """Parse file if file_path is in config, otherwise pass through."""
-    config = get_config()
     file_path = config.get("configurable", {}).get("file_path", "")
     if not file_path:
         return {}
@@ -57,7 +57,7 @@ def parser_node(state: WorkflowState) -> dict:
         return Command(goto=END, update={"error": f"不支持的文件格式: {suffix}，支持: {', '.join(PARSERS)}"})
 
     try:
-        text = parser(file_path)
+        text = await asyncio.to_thread(parser, file_path)
         return {"input": text}
     except Exception as e:
         return Command(goto=END, update={"error": f"文件解析失败: {e}"})

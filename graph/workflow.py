@@ -40,9 +40,8 @@ from openai import (
 )
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.config import get_config
 from langgraph.types import Command, RetryPolicy
+from langchain_core.runnables import RunnableConfig
 
 from graph.state import WorkflowState
 from graph.parser import parser_node
@@ -54,7 +53,7 @@ from config.models import PROMPT_VERSION
 
 # ── Checkpointer（惰性初始化，由 server startup 触发）─────────────────
 
-_checkpointer: AsyncPostgresSaver | MemorySaver = MemorySaver()  # 默认内存，init 后切换
+_checkpointer: "AsyncPostgresSaver | MemorySaver" = MemorySaver()  # 默认内存，init 后切换
 _checkpointer_ctx = None  # PostgresSaver 的 context manager
 _review_graph = None
 _qa_graph = None
@@ -143,14 +142,13 @@ def _make_retriever_node(branch_name: str):
       - Timeout / RateLimit / ConnectionError / 5xx → 向上抛，checkpoint 恢复
       - Chroma / 桥接等本地异常 → 降级返回空（重试修不好）
     """
-    def _node(state: WorkflowState) -> dict:
+    def _node(state: WorkflowState, config: RunnableConfig) -> dict:
         if branch_name not in state["branches"]:
             logger.warning("分支 [%s] 不在 branches=%s 中，跳过", branch_name, state["branches"])
             return {"branch_results": {branch_name: []}}
         try:
             r = _get_retriever()
-            cfg = get_config()
-            rerank = cfg.get("configurable", {}).get("rerank", True)
+            rerank = config.get("configurable", {}).get("rerank", True)
             logger.info("分支 [%s] 开始检索, query=%.80s, rerank=%s", branch_name, state["input"], rerank)
             result = r.search_branch(branch_name, state["input"], rerank=rerank)
             logger.info("分支 [%s] 检索完成, 返回 %d 条", branch_name, len(result))
@@ -284,6 +282,7 @@ def _compile_graphs() -> None:
 
 async def init_checkpointer(postgres_url: str) -> None:
     """初始化 PostgresSaver 并重新编译图。服务器启动时调用。"""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     global _checkpointer, _checkpointer_ctx
     _checkpointer_ctx = AsyncPostgresSaver.from_conn_string(postgres_url)
     _checkpointer = await _checkpointer_ctx.__aenter__()
