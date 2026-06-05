@@ -6,6 +6,8 @@ JSONL + 桥接文件加载器 — 加载拆分好的法律条文为 Document 对
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from langchain_core.documents import Document

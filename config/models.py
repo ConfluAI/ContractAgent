@@ -4,6 +4,7 @@
 所有 API 调用（Embedding / LLM / Rerank）共用同一个 httpx Client，单连接池。
 """
 
+from __future__ import annotations
 import os
 from typing import Optional
 from dotenv import load_dotenv

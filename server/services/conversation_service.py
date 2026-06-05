@@ -2,6 +2,7 @@
 会话线程服务 — 线程 CRUD + 消息管理。
 """
 
+from __future__ import annotations
 import logging
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
