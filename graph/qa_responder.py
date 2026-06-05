@@ -2,19 +2,22 @@
 QA responder node — 合同条款咨询服务。
 
 单一节点，两种模式:
-  - invoke():   writer=None → 阻塞等待完整响应 → return {"review_output": text}
-  - astream():  writer 注入 → 逐 token 推送 → return {"review_output": full_text}
+  - blocking:  _stream_queues 中无对应队列 → 阻塞等待完整响应
+  - streaming: _stream_queues 中有队列 → 逐 token 推送
 """
 
+import asyncio
 from typing import Optional
 
 from openai import BadRequestError, AuthenticationError
-from langgraph.config import get_stream_writer, get_config
 from langgraph.types import Command
 from langgraph.constants import END
+from langchain_core.runnables import RunnableConfig
 
 from config.models import get_async_client, model_name
 from graph.state import WorkflowState
+
+_stream_queues: dict[str, asyncio.Queue] = {}
 
 QA_RESPONDER_PROMPT = """你是一位资深法律顾问。请根据以下法律依据，回答用户的咨询问题。
 
@@ -84,28 +87,24 @@ def _build_qa_messages(
     return messages
 
 
-# ── 统一节点（invoke / astream 共用）────────────────────────────────
+# ── 统一节点（blocking / streaming 共用）────────────────────────────────
 
-async def qa_responder_node(state: WorkflowState) -> dict:
+async def qa_responder_node(state: WorkflowState, config: RunnableConfig) -> dict:
     """法律咨询节点。
 
-    通过 get_stream_writer() 判断模式：
-      - RuntimeError → 阻塞模式（ainvoke）
-      - 拿到 writer → 流式模式（astream custom），逐 token 推送
+    通过 configurable 中的 _token_queue 判断模式：
+      - 无 _token_queue → 阻塞模式
+      - 有 _token_queue → 流式模式，逐 token 推送到队列
     """
     client = get_async_client()
     model = model_name("review_llm")
     legal_basis = state["retrieval_result"].get("assembled_text", "")
-    cfg = get_config()
-    conversation_history = cfg.get("configurable", {}).get("conversation_history")
+    conversation_history = config.get("configurable", {}).get("conversation_history")
+    thread_id = config.get("configurable", {}).get("thread_id", "")
+    token_queue: Optional[asyncio.Queue] = _stream_queues.get(thread_id)
 
     try:
-        writer = get_stream_writer()
-    except RuntimeError:
-        writer = None
-
-    try:
-        if writer is None:
+        if token_queue is None:
             resp = await client.chat.completions.create(
                 model=model,
                 messages=_build_qa_messages(state["input"], legal_basis, conversation_history),
@@ -125,9 +124,9 @@ async def qa_responder_node(state: WorkflowState) -> dict:
                 token = chunk.choices[0].delta.content or ""
                 if token:
                     full_text += token
-                    writer({"token": token})
+                    await token_queue.put({"token": token})
             return {"review_output": full_text, "retrieval_result": state.get("retrieval_result", {})}
     except (BadRequestError, AuthenticationError) as e:
+        if token_queue is not None:
+            await token_queue.put({"_error": str(e)})
         return Command(goto=END, update={"error": f"[法律咨询] {e}"})
-    # Timeout / RateLimit / ConnectionError / InternalServerError
-    # 不捕获 → 向上抛给 LangGraph，checkpoint 保存后可重试

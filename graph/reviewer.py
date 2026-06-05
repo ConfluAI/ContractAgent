@@ -2,19 +2,23 @@
 Reviewer node — LLM-powered contract review against retrieved legal basis.
 
 单一节点，两种模式:
-  - invoke():   writer=None → 阻塞等待完整响应 → return {"review_output": text}
-  - astream():  writer 注入 → 逐 token 推送 → return {"review_output": full_text}
+  - blocking:  _stream_queues 中无对应队列 → 阻塞等待完整响应
+  - streaming: _stream_queues 中有队列 → 逐 token 推送
 """
 
+import asyncio
 from typing import Optional
 
 from openai import BadRequestError, AuthenticationError
-from langgraph.config import get_stream_writer, get_config
 from langgraph.types import Command
 from langgraph.constants import END
+from langchain_core.runnables import RunnableConfig
 
 from config.models import get_async_client, model_name
 from graph.state import WorkflowState
+
+# 模块级 token 队列注册表，key=thread_id
+_stream_queues: dict[str, asyncio.Queue] = {}
 
 
 REVIEWER_PROMPT = """你是一位资深合同法律师。请根据以下法律依据，对合同/法律问题进行审查分析。
@@ -89,14 +93,14 @@ def _build_review_messages(
     return messages
 
 
-# ── 统一节点（invoke / astream 共用）────────────────────────────────
+# ── 统一节点（blocking / streaming 共用）────────────────────────────────
 
-async def reviewer_node(state: WorkflowState) -> dict:
+async def reviewer_node(state: WorkflowState, config: RunnableConfig) -> dict:
     """合同审查节点。
 
-    通过 get_stream_writer() 判断模式：
-      - RuntimeError → 阻塞模式（ainvoke），等完整响应
-      - 拿到 writer → 流式模式（astream custom），逐 token 推送
+    通过 configurable 中的 _token_queue 判断模式：
+      - 无 _token_queue → 阻塞模式，等完整响应
+      - 有 _token_queue → 流式模式，逐 token 推送到队列
 
     错误处理：
       - BadRequestError / AuthenticationError → 致命，设 error
@@ -105,17 +109,12 @@ async def reviewer_node(state: WorkflowState) -> dict:
     client = get_async_client()
     model = model_name("review_llm")
     legal_basis = state["retrieval_result"].get("assembled_text", "")
-    cfg = get_config()
-    conversation_history = cfg.get("configurable", {}).get("conversation_history")
-
-    # 判断运行模式
-    try:
-        writer = get_stream_writer()
-    except RuntimeError:
-        writer = None
+    conversation_history = config.get("configurable", {}).get("conversation_history")
+    thread_id = config.get("configurable", {}).get("thread_id", "")
+    token_queue: Optional[asyncio.Queue] = _stream_queues.get(thread_id)
 
     try:
-        if writer is None:
+        if token_queue is None:
             # ── 阻塞模式 ──
             resp = await client.chat.completions.create(
                 model=model,
@@ -137,9 +136,11 @@ async def reviewer_node(state: WorkflowState) -> dict:
                 token = chunk.choices[0].delta.content or ""
                 if token:
                     full_text += token
-                    writer({"token": token})
+                    await token_queue.put({"token": token})
             return {"review_output": full_text, "retrieval_result": state.get("retrieval_result", {})}
     except (BadRequestError, AuthenticationError) as e:
+        if token_queue is not None:
+            await token_queue.put({"_error": str(e)})
         return Command(goto=END, update={"error": f"[合同审查] {e}"})
     # Timeout / RateLimit / ConnectionError / InternalServerError
     # 不捕获 → 向上抛给 LangGraph，checkpoint 保存后可重试
