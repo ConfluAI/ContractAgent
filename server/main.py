@@ -15,7 +15,13 @@ from server.services.checkpoint_cleanup import cleanup_loop
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await init_checkpointer(settings.POSTGRES_URL)
+    try:
+        await init_checkpointer(settings.POSTGRES_URL)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "PostgreSQL 不可用，使用内存 checkpointer（重启后状态丢失）"
+        )
     # 预热所有硅基流动 HTTP 连接池（rerank + embedding + LLM），消除首次请求冷启动
     await asyncio.to_thread(warmup_all)
     # 后台定时清理过期 checkpoint（7 天 TTL）
