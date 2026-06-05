@@ -70,6 +70,15 @@
               <el-tag v-else-if="reviewResult && !reviewing" type="success" size="small" effect="plain">
                 审查完成
               </el-tag>
+              <el-button
+                v-if="reviewResult && !reviewing"
+                type="primary"
+                size="small"
+                @click="downloadReport"
+              >
+                <el-icon><Download /></el-icon>
+                下载报告
+              </el-button>
             </div>
           </template>
 
@@ -122,6 +131,7 @@
 
 <script setup>
 import { ref } from "vue";
+import { Download } from "@element-plus/icons-vue";
 import { uploadFileStream, uploadFile } from "../api/review";
 import { ElMessage } from "element-plus";
 import ReviewResult from "./ReviewResult.vue";
@@ -167,6 +177,18 @@ function newConversation() {
   }
   threadId.value = null;
   resetState();
+}
+
+function downloadReport() {
+  if (!reviewResult.value) return;
+  const blob = new Blob([reviewResult.value], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `审查报告_${new Date().toISOString().slice(0, 10)}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+  ElMessage.success("报告已下载");
 }
 
 function resetState() {
