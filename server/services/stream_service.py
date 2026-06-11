@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,11 +123,16 @@ async def _stream_graph(
         final_error = ""
 
         try:
+            _last_data_time = time.monotonic()
             while not astream_ended.is_set() or not token_queue.empty():
                 try:
                     item = await asyncio.wait_for(token_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
+                    if time.monotonic() - _last_data_time > 15:
+                        yield {"_heartbeat": True}
+                        _last_data_time = time.monotonic()
                     continue
+                _last_data_time = time.monotonic()
                 if "_dispatcher" in item:
                     dispatcher_info["contract_type"] = item.get("contract_type", "")
                     dispatcher_info["branches"] = item.get("branches", [])
