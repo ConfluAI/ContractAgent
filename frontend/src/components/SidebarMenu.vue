@@ -86,7 +86,7 @@ const historyPath = computed(() => isAdmin.value ? "/admin/history" : "/user/his
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #c9973b;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -142,7 +142,7 @@ const historyPath = computed(() => isAdmin.value ? "/admin/history" : "/user/his
   background: rgba(255, 255, 255, 0.08) !important;
 }
 .sidebar-menu :deep(.el-menu-item.is-active) {
-  background: linear-gradient(135deg, rgba(64, 158, 255, 0.3), rgba(99, 102, 241, 0.3)) !important;
+  background: rgba(201, 151, 59, 0.25) !important;
   font-weight: 600;
 }
 .menu-divider {
