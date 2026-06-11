@@ -58,7 +58,7 @@ function handleCommand(cmd) {
   background: #f5f7fa;
 }
 .header-avatar {
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   color: #fff;
   font-weight: 600;
   flex-shrink: 0;
@@ -87,7 +87,7 @@ function handleCommand(cmd) {
   border-bottom: 1px solid #f0f0f0;
 }
 .dropdown-avatar {
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   color: #fff;
   font-weight: 600;
   flex-shrink: 0;
