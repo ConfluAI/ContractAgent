@@ -248,7 +248,7 @@ async function handleAsk() {
         warnings.value = data.warnings || [];
       } else if (event === "retry") {
         streamOutput.value = "";
-        ElMessage.warning(`连接中断，正在重试 (${data.attempt}/${data.max_retries})...`);
+        ElMessage.info(`生成超时，正在重试 (${data.attempt}/${data.max_retries})...`);
       } else if (event === "token") {
         streamOutput.value += data.token;
       } else if (event === "done") {
@@ -288,7 +288,7 @@ async function handleAsk() {
 async function fallbackToBlocking(q) {
   loading.value = true;
   streamPhase.value = "";
-  ElMessage.warning("流式连接中断，正在切换为普通模式...");
+  ElMessage.info("正在切换为普通模式...");
   try {
     const { data } = await submitQA(q);
     if (data.error) {
