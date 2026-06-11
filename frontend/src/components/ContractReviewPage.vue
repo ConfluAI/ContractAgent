@@ -82,11 +82,12 @@
             </div>
           </template>
 
-          <!-- 检索中 -->
-          <div v-if="streamPhase === 'retrieval'" class="loading-state">
+          <!-- 审查进行中（检索/生成/兜底阻塞） -->
+          <div v-if="reviewing && !reviewResult && !streamOutput" class="loading-state">
             <el-icon :size="48" class="loading-icon"><Loading /></el-icon>
-            <p>AI 正在分析合同并检索相关法律条文...</p>
-            <p class="loading-hint">这可能需要 5-15 秒</p>
+            <p v-if="streamPhase === 'retrieval'">AI 正在分析合同并检索相关法律条文...</p>
+            <p v-else>AI 正在撰写审查报告...</p>
+            <p class="loading-hint">{{ streamPhase === 'retrieval' ? '这可能需要 5-15 秒' : '正在逐段生成，可能需要 30-60 秒' }}</p>
           </div>
 
           <!-- 流式生成中 / 结果展示 -->
@@ -132,7 +133,7 @@
 <script setup>
 import { ref } from "vue";
 import { Download } from "@element-plus/icons-vue";
-import { uploadFileStream, uploadFile } from "../api/review";
+import { uploadFile } from "../api/review";
 import { ElMessage } from "element-plus";
 import ReviewResult from "./ReviewResult.vue";
 
@@ -144,39 +145,8 @@ const streamPhase = ref(""); // '' | 'retrieval' | 'generating'
 const warnings = ref([]);
 const threadId = ref(null);
 
-let streamCtrl = null;
-
 function handleFileChange(file) {
   selectedFile.value = file.raw;
-}
-
-async function fallbackBlocking() {
-  if (!selectedFile.value) return;
-  reviewing.value = true;
-  streamPhase.value = "";
-  try {
-    const { data } = await uploadFile(selectedFile.value);
-    warnings.value = data.warnings || [];
-    if (data.error) {
-      ElMessage.error(data.error);
-    } else {
-      reviewResult.value = data.review_output;
-      ElMessage.success("审查完成");
-    }
-  } catch (e) {
-    ElMessage.error("普通模式也失败了：" + (e.response?.data?.detail || e.message));
-  } finally {
-    reviewing.value = false;
-  }
-}
-
-function newConversation() {
-  if (streamCtrl) {
-    streamCtrl.abort();
-    streamCtrl = null;
-  }
-  threadId.value = null;
-  resetState();
 }
 
 function downloadReport() {
@@ -192,10 +162,6 @@ function downloadReport() {
 }
 
 function resetState() {
-  if (streamCtrl) {
-    streamCtrl.abort();
-    streamCtrl = null;
-  }
   reviewing.value = false;
   streamPhase.value = "";
   streamOutput.value = "";
@@ -213,51 +179,21 @@ async function handleFileReview() {
   reviewing.value = true;
   streamPhase.value = "retrieval";
 
-  streamCtrl = uploadFileStream(selectedFile.value, threadId.value, {
-    onEvent(event, data) {
-      if (event === "retrieval_done") {
-        streamPhase.value = "generating";
-        warnings.value = data.warnings || [];
-      } else if (event === "retry") {
-        streamOutput.value = "";
-        ElMessage.warning(`连接中断，正在重试 (${data.attempt}/${data.max_retries})...`);
-      } else if (event === "token") {
-        streamOutput.value += data.token;
-      } else if (event === "done") {
-        reviewing.value = false;
-        streamPhase.value = "";
-        streamCtrl = null;
-        if (data.error) {
-          ElMessage.error(data.error);
-          if (streamOutput.value) {
-            reviewResult.value = streamOutput.value;
-          }
-        } else {
-          reviewResult.value = streamOutput.value || data.full_output;
-          if (data.thread_id) threadId.value = data.thread_id;
-          ElMessage.success("审查完成");
-        }
-      }
-    },
-    onError(err) {
-      streamCtrl = null;
-      if (streamOutput.value) {
-        reviewResult.value = streamOutput.value;
-        streamOutput.value = "";
-      }
-      // 兜底：切到阻塞 API
-      ElMessage.warning("流式连接中断，正在切换为普通模式...");
-      fallbackBlocking();
-    },
-    onComplete() {
-      reviewing.value = false;
-      streamPhase.value = "";
-      streamCtrl = null;
-      if (streamOutput.value) {
-        reviewResult.value = streamOutput.value;
-      }
-    },
-  });
+  try {
+    const { data } = await uploadFile(selectedFile.value);
+    warnings.value = data.warnings || [];
+    if (data.error) {
+      ElMessage.error(data.error);
+    } else {
+      reviewResult.value = data.review_output;
+      ElMessage.success("审查完成");
+    }
+  } catch (e) {
+    ElMessage.error("审查失败：" + (e.response?.data?.detail || e.message));
+  } finally {
+    reviewing.value = false;
+    streamPhase.value = "";
+  }
 }
 </script>
 
@@ -309,11 +245,11 @@ async function handleFileReview() {
   height: 48px;
   border-radius: 10px;
   font-size: 16px;
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   border: none;
 }
 .submit-btn:hover {
-  background: linear-gradient(135deg, #66b1ff, #7c7ff7);
+  background: #3d7abf;
 }
 .file-upload :deep(.el-upload-dragger) {
   border-radius: 12px;
