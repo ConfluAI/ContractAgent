@@ -25,8 +25,11 @@ router = APIRouter(prefix="/api", tags=["合同审查"])
 async def _sse_wrap(generator):
     """将事件 dict 生成器包装为 SSE 文本流。"""
     async for event in generator:
-        line = f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
-        yield line
+        if event.get("_heartbeat"):
+            yield ": heartbeat\n\n"
+        else:
+            line = f"event: {event['event']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
+            yield line
 
 
 # ── 阻塞端点（保留向后兼容）─────────────────────────────────────────────
