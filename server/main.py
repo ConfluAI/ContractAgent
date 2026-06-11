@@ -1,4 +1,9 @@
 import asyncio
+import platform
+
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,8 +24,10 @@ async def lifespan(app: FastAPI):
         await init_checkpointer(settings.POSTGRES_URL)
     except Exception:
         import logging
+        import traceback
         logging.getLogger(__name__).warning(
-            "PostgreSQL 不可用，使用内存 checkpointer（重启后状态丢失）"
+            "PostgreSQL 不可用，使用内存 checkpointer（重启后状态丢失）\n%s",
+            traceback.format_exc(),
         )
     # 预热所有硅基流动 HTTP 连接池（rerank + embedding + LLM），消除首次请求冷启动
     await asyncio.to_thread(warmup_all)
