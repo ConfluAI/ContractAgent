@@ -144,13 +144,13 @@ async function handleLogin() {
   width: 72px;
   height: 72px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 0 auto 16px;
   color: #fff;
-  box-shadow: 0 8px 24px rgba(64, 158, 255, 0.3);
+  box-shadow: 0 8px 24px rgba(44, 94, 168, 0.3);
 }
 .login-title {
   font-size: 26px;
@@ -175,12 +175,12 @@ async function handleLogin() {
   border-radius: 10px;
   font-size: 16px;
   height: 44px;
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   border: none;
   letter-spacing: 4px;
 }
 .login-btn:hover {
-  background: linear-gradient(135deg, #66b1ff, #7c7ff7);
+  background: #3d7abf;
 }
 .login-footer {
   text-align: center;
