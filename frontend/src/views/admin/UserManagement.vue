@@ -175,7 +175,7 @@ onMounted(loadUsers);
   gap: 10px;
 }
 .user-avatar-sm {
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: #2c5ea8;
   color: #fff;
   font-weight: 600;
   font-size: 13px;
