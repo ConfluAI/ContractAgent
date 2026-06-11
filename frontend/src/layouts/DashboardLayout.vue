@@ -41,7 +41,7 @@ const homePath = computed(() => authStore.user?.role === "admin" ? "/admin/dashb
   height: 100vh;
 }
 .layout-aside {
-  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+  background: #1a2332;
   overflow-y: auto;
   box-shadow: 2px 0 12px rgba(0, 0, 0, 0.15);
 }
