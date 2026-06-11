@@ -81,7 +81,7 @@
               </div>
             </div>
             <div v-if="isAdmin" class="action-item" @click="$router.push('/admin/users')">
-              <div class="action-icon action-icon-purple">
+              <div class="action-icon action-icon-gold">
                 <el-icon :size="28"><UserFilled /></el-icon>
               </div>
               <div class="action-text">
@@ -165,7 +165,7 @@ onMounted(async () => {
   max-width: 1200px;
 }
 .welcome-banner {
-  background: linear-gradient(135deg, #409eff 0%, #6366f1 100%);
+  background: linear-gradient(135deg, #2c5ea8 0%, #1a3d6e 100%);
   border-radius: 16px;
   padding: 32px 40px;
   margin-bottom: 24px;
@@ -224,7 +224,7 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 .stat-card-blue .stat-icon {
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: linear-gradient(135deg, #2c5ea8, #1a3d6e);
 }
 .stat-card-green .stat-icon {
   background: linear-gradient(135deg, #67c23a, #409eff);
@@ -282,13 +282,13 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 .action-icon-blue {
-  background: linear-gradient(135deg, #409eff, #6366f1);
+  background: linear-gradient(135deg, #2c5ea8, #1a3d6e);
 }
 .action-icon-green {
   background: linear-gradient(135deg, #67c23a, #409eff);
 }
-.action-icon-purple {
-  background: linear-gradient(135deg, #9b59b6, #6366f1);
+.action-icon-gold {
+  background: linear-gradient(135deg, #c9973b, #a67c2e);
 }
 .action-title {
   font-size: 15px;
