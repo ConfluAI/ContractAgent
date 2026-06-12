@@ -1,64 +1,71 @@
 @echo off
-chcp 65001 >nul
-setlocal enabledelayedexpansion
-
 echo ========================================
-echo   合同审查智能体 - 启动脚本
+echo   ContractAgent - Start Script
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
-:: ── 检查 .env ──
+:: -- check .env --
 if not exist ".env" (
-    echo [错误] 未找到 .env 文件，请先配置 API Key
+    echo [ERROR] .env file not found
     pause
     exit /b 1
 )
 
-:: ── 检查并构建向量库 ──
-set BUILT=1
-for %%d in (data\chroma_civil_code data\chroma_labor_law data\chroma_labor_contract_law data\chroma_judicial_interpretation data\chroma_labor_contract_regulation) do (
-    if not exist "%%d\" (
-        set BUILT=0
-    )
+:: -- check and build vector store --
+if not exist "data\chroma_civil_code\" (
+    goto :build_vectors
 )
-if "!BUILT!"=="0" (
-    echo [构建] 向量数据库未完整，正在构建...
-    set PYTHONPATH=%~dp0
-    python builder\build_vector_store.py
-    if errorlevel 1 (
-        echo [错误] 向量库构建失败
-        pause
-        exit /b 1
-    )
-    echo.
-) else (
-    echo [跳过] 向量数据库已存在
-    echo.
+if not exist "data\chroma_labor_law\" (
+    goto :build_vectors
 )
+if not exist "data\chroma_labor_contract_law\" (
+    goto :build_vectors
+)
+if not exist "data\chroma_judicial_interpretation\" (
+    goto :build_vectors
+)
+if not exist "data\chroma_labor_contract_regulation\" (
+    goto :build_vectors
+)
+echo [SKIP] Vector store already exists
+echo.
+goto :check_frontend
 
-:: ── 检查前端依赖 ──
+:build_vectors
+echo [BUILD] Building vector store ...
+set PYTHONPATH=%~dp0
+python builder\build_vector_store.py
+if %errorlevel% neq 0 (
+    echo [ERROR] Vector store build failed
+    pause
+    exit /b 1
+)
+echo.
+
+:check_frontend
+:: -- check frontend deps --
 if not exist "frontend\node_modules\" (
-    echo [安装] 前端依赖...
+    echo [INSTALL] Installing frontend dependencies ...
     cd frontend
     call npm install
     cd ..
     echo.
 )
 
-echo [1/2] 启动后端服务 (端口 8000)...
-start "ContractAgent-Backend" cmd /k "cd /d "%~dp0" && set PYTHONPATH=%~dp0 && python run_server.py"
+echo [1/2] Starting backend on port 8000 ...
+start "ContractAgent-Backend" cmd /k "cd /d %~dp0 && set PYTHONPATH=%~dp0 && python run_server.py"
 
 timeout /t 3 /nobreak >nul
 
-echo [2/2] 启动前端服务 (端口 5173)...
-start "ContractAgent-Frontend" cmd /k "cd /d "%~dp0frontend" && npm run dev"
+echo [2/2] Starting frontend on port 5173 ...
+start "ContractAgent-Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
 echo.
 echo ========================================
-echo   两个窗口已启动！
-echo   浏览器访问: http://localhost:5173
+echo   Services started!
+echo   Open: http://localhost:5173
 echo ========================================
 echo.
 pause
