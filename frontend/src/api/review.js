@@ -61,6 +61,7 @@ export function uploadFileStream(file, threadId, handlers) {
   }
 
   fetch(url, {
+    method: "POST",
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },

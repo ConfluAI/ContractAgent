@@ -22,6 +22,10 @@ def _merge_branch_results(
 
 class WorkflowState(TypedDict):
     input: str
+    file_path: str                   # 文件路径（~50 chars），不存全文
+    contract_name: str               # 合同名称（从文档首行/文件名提取）
+    clauses: list[dict]              # [{clause_num, sub_num, title, content}, ...] 条款切分结果
+    clause_reviews: list[dict]       # [{clause_num, title, compliant, risks, suggestion}, ...]
     contract_type: str
     branches: list[str]
     branch_results: Annotated[dict[str, list[dict]], _merge_branch_results]
@@ -32,4 +36,4 @@ class WorkflowState(TypedDict):
     error: str
     # operator.add：任意节点返回 {"warnings": [...]} 自动追加，无需手动拼接。
     warnings: Annotated[list[str], operator.add]
-    # file_path, rerank, conversation_history → configurable（不变输入，不存 checkpoint）
+    # rerank, conversation_history → configurable（不变输入，不存 checkpoint）

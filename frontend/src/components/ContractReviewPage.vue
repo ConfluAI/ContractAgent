@@ -42,15 +42,25 @@
               <span>{{ selectedFile.name }}</span>
             </div>
             <el-button
+              v-if="!reviewing"
               type="primary"
               size="large"
               class="submit-btn"
-              :loading="reviewing"
               :disabled="!selectedFile"
               @click="handleFileReview"
             >
               <el-icon><Search /></el-icon>
-              {{ reviewing ? (streamPhase === 'retrieval' ? '检索中...' : '生成中...') : '开始审查' }}
+              开始审查
+            </el-button>
+            <el-button
+              v-else
+              type="danger"
+              size="large"
+              class="submit-btn"
+              @click="cancelReview"
+            >
+              <el-icon><Close /></el-icon>
+              取消审查
             </el-button>
           </div>
         </el-card>
@@ -64,14 +74,20 @@
                 <el-icon><Notebook /></el-icon>
                 <span>审查报告</span>
               </div>
-              <el-tag v-if="streamPhase === 'generating'" type="warning" size="small" effect="plain">
-                生成中...
+              <el-tag v-if="streamPhase === 'retrieval'" type="info" size="small" effect="plain">
+                检索中...
               </el-tag>
-              <el-tag v-else-if="reviewResult && !reviewing" type="success" size="small" effect="plain">
+              <el-tag v-else-if="streamPhase === 'mapping'" type="warning" size="small" effect="plain">
+                逐条审查 {{ mapProgress.current }}/{{ mapProgress.total }}
+              </el-tag>
+              <el-tag v-else-if="streamPhase === 'reducing'" type="warning" size="small" effect="plain">
+                生成报告中...
+              </el-tag>
+              <el-tag v-else-if="streamOutput && !reviewing" type="success" size="small" effect="plain">
                 审查完成
               </el-tag>
               <el-button
-                v-if="reviewResult && !reviewing"
+                v-if="streamOutput && !reviewing"
                 type="primary"
                 size="small"
                 @click="downloadReport"
@@ -82,16 +98,33 @@
             </div>
           </template>
 
-          <!-- 审查进行中（检索/生成/兜底阻塞） -->
-          <div v-if="reviewing && !reviewResult && !streamOutput" class="loading-state">
+          <!-- 检索阶段 -->
+          <div v-if="streamPhase === 'retrieval'" class="loading-state">
             <el-icon :size="48" class="loading-icon"><Loading /></el-icon>
-            <p v-if="streamPhase === 'retrieval'">AI 正在分析合同并检索相关法律条文...</p>
-            <p v-else>AI 正在撰写审查报告...</p>
-            <p class="loading-hint">{{ streamPhase === 'retrieval' ? '这可能需要 5-15 秒' : '正在逐段生成，可能需要 30-60 秒' }}</p>
+            <p>AI 正在分析合同并检索相关法律条文...</p>
+            <p class="loading-hint">这可能需要 5-15 秒</p>
           </div>
 
-          <!-- 流式生成中 / 结果展示 -->
-          <template v-else-if="streamOutput || reviewResult">
+          <!-- 逐条审查阶段 -->
+          <div v-else-if="streamPhase === 'mapping'" class="loading-state">
+            <el-icon :size="48" class="loading-icon"><Loading /></el-icon>
+            <p>正在逐条审查合同条款</p>
+            <div class="map-info">
+              <el-progress
+                :percentage="mapProgress.total ? Math.round(mapProgress.current / mapProgress.total * 100) : 0"
+                :stroke-width="8"
+                :show-text="false"
+                style="max-width: 300px; margin: 12px auto"
+              />
+              <p class="loading-hint">
+                第 {{ mapProgress.current }}/{{ mapProgress.total }} 条
+                <span v-if="mapProgress.clause_title"> — {{ mapProgress.clause_title }}</span>
+              </p>
+            </div>
+          </div>
+
+          <!-- 汇总生成阶段 / 已完成结果 -->
+          <template v-else-if="streamOutput">
             <el-alert
               v-for="(w, i) in warnings"
               :key="i"
@@ -101,8 +134,8 @@
               :closable="false"
               style="margin-bottom: 12px"
             />
-            <ReviewResult :output="streamOutput || reviewResult" />
-            <span v-if="streamPhase === 'generating'" class="cursor-blink">|</span>
+            <ReviewResult :output="streamOutput" />
+            <span v-if="reviewing" class="cursor-blink">|</span>
           </template>
 
           <!-- 空状态 -->
@@ -116,7 +149,7 @@
               </div>
               <div class="tip-item">
                 <el-icon><CircleCheck /></el-icon>
-                <span>自动生成风险识别和修改建议</span>
+                <span>按条款逐条审查 + 汇总报告</span>
               </div>
               <div class="tip-item">
                 <el-icon><CircleCheck /></el-icon>
@@ -131,27 +164,28 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
-import { Download } from "@element-plus/icons-vue";
-import { uploadFile } from "../api/review";
+import { ref, reactive } from "vue";
+import { Download, Close } from "@element-plus/icons-vue";
+import { uploadFileStream } from "../api/review";
 import { ElMessage } from "element-plus";
 import ReviewResult from "./ReviewResult.vue";
 
 const selectedFile = ref(null);
 const reviewing = ref(false);
-const reviewResult = ref("");
 const streamOutput = ref("");
-const streamPhase = ref(""); // '' | 'retrieval' | 'generating'
+const streamPhase = ref(""); // '' | 'retrieval' | 'mapping' | 'reducing'
+const mapProgress = reactive({ current: 0, total: 0, clause_title: "" });
 const warnings = ref([]);
 const threadId = ref(null);
+let abortCtrl = null;
 
 function handleFileChange(file) {
   selectedFile.value = file.raw;
 }
 
 function downloadReport() {
-  if (!reviewResult.value) return;
-  const blob = new Blob([reviewResult.value], { type: "text/markdown;charset=utf-8" });
+  if (!streamOutput.value) return;
+  const blob = new Blob([streamOutput.value], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -165,11 +199,22 @@ function resetState() {
   reviewing.value = false;
   streamPhase.value = "";
   streamOutput.value = "";
-  reviewResult.value = "";
+  mapProgress.current = 0;
+  mapProgress.total = 0;
+  mapProgress.clause_title = "";
   warnings.value = [];
+  abortCtrl = null;
 }
 
-async function handleFileReview() {
+function cancelReview() {
+  if (abortCtrl) {
+    abortCtrl.abort();
+  }
+  resetState();
+  ElMessage.info("已取消审查");
+}
+
+function handleFileReview() {
   if (!selectedFile.value) {
     ElMessage.warning("请选择文件");
     return;
@@ -179,21 +224,63 @@ async function handleFileReview() {
   reviewing.value = true;
   streamPhase.value = "retrieval";
 
-  try {
-    const { data } = await uploadFile(selectedFile.value);
-    warnings.value = data.warnings || [];
-    if (data.error) {
-      ElMessage.error(data.error);
-    } else {
-      reviewResult.value = data.review_output;
-      ElMessage.success("审查完成");
-    }
-  } catch (e) {
-    ElMessage.error("审查失败：" + (e.response?.data?.detail || e.message));
-  } finally {
-    reviewing.value = false;
-    streamPhase.value = "";
-  }
+  abortCtrl = uploadFileStream(selectedFile.value, threadId.value, {
+    onEvent(event, data) {
+      switch (event) {
+        case "retrieval_done":
+          streamPhase.value = "mapping";
+          warnings.value = data.warnings || [];
+          break;
+
+        case "map_progress":
+          mapProgress.current = data.current;
+          mapProgress.total = data.total;
+          mapProgress.clause_title = data.clause_title || "";
+          break;
+
+        case "map_done":
+          streamPhase.value = "reducing";
+          break;
+
+        case "token":
+          if (streamPhase.value !== "reducing") {
+            streamPhase.value = "reducing";
+          }
+          streamOutput.value += data.token || "";
+          break;
+
+        case "done":
+          if (data.error) {
+            ElMessage.error(data.error);
+          } else {
+            if (data.full_output && !streamOutput.value) {
+              streamOutput.value = data.full_output;
+            }
+            threadId.value = data.thread_id;
+            ElMessage.success("审查完成");
+          }
+          reviewing.value = false;
+          break;
+
+        case "retry":
+          // 重试中，重置输出
+          streamOutput.value = "";
+          streamPhase.value = "retrieval";
+          ElMessage.warning(`检索超时，正在重试 (${data.attempt}/${data.max_retries})...`);
+          break;
+      }
+    },
+
+    onError(err) {
+      ElMessage.error("审查失败：" + err.message);
+      reviewing.value = false;
+      streamPhase.value = "";
+    },
+
+    onComplete() {
+      reviewing.value = false;
+    },
+  });
 }
 </script>
 
@@ -227,6 +314,8 @@ async function handleFileReview() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .header-left {
   display: flex;
@@ -245,10 +334,12 @@ async function handleFileReview() {
   height: 48px;
   border-radius: 10px;
   font-size: 16px;
+}
+.submit-btn:not(.el-button--danger) {
   background: #2c5ea8;
   border: none;
 }
-.submit-btn:hover {
+.submit-btn:not(.el-button--danger):hover {
   background: #3d7abf;
 }
 .file-upload :deep(.el-upload-dragger) {
@@ -312,6 +403,9 @@ async function handleFileReview() {
 .loading-hint {
   font-size: 12px;
   color: #c0c4cc;
+}
+.map-info {
+  margin-top: 8px;
 }
 .empty-state {
   text-align: center;

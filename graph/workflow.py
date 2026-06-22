@@ -47,6 +47,8 @@ from graph.state import WorkflowState
 from graph.parser import parser_node
 from graph.dispatcher import dispatcher_node
 from graph.reviewer import reviewer_node
+from graph.map_reviewer import map_reviewer_node
+from graph.reduce_reviewer import reduce_reviewer_node
 from graph.qa_responder import qa_responder_node
 from retrieval.retriever import ContractRetriever, BRANCH_SPEC
 from config.models import PROMPT_VERSION
@@ -209,7 +211,11 @@ def _route_from_merge(state: WorkflowState) -> str:
     # 此检查为防御性：若未来有人直接 return {"error": ...} 而未用 Command，仍能终止。
     if state.get("error"):
         return END
-    return "continue"
+    # 有条款切分结果 → 走逐条审查 + 汇总报告
+    if state.get("clauses"):
+        return "map_review"
+    # 无条款（文本输入模式）→ 走旧单次审查
+    return "single_review"
 
 
 # ── Shared retrieval layer ───────────────────────────────────────────────
@@ -241,13 +247,24 @@ _review_graph_builder.add_node(
     retry_policy=RetryPolicy(retry_on=_RETRY_ON_DISPATCHER, max_attempts=3),
 )
 _build_retrieval_layer(_review_graph_builder)
+_review_graph_builder.add_node(
+    "map_reviewer", map_reviewer_node,
+    retry_policy=RetryPolicy(retry_on=_RETRY_ON_LLM, max_attempts=3),
+)
+_review_graph_builder.add_node(
+    "reduce_reviewer", reduce_reviewer_node,
+    retry_policy=RetryPolicy(retry_on=_RETRY_ON_LLM, max_attempts=3),
+)
 _review_graph_builder.add_node("reviewer", reviewer_node)
 
 _review_graph_builder.add_edge("parser", "dispatcher")
 _review_graph_builder.add_conditional_edges("merge_retrieval", _route_from_merge, {
-    "continue": "reviewer",
+    "map_review": "map_reviewer",
+    "single_review": "reviewer",
     END: END,
 })
+_review_graph_builder.add_edge("map_reviewer", "reduce_reviewer")
+_review_graph_builder.add_edge("reduce_reviewer", END)
 _review_graph_builder.add_edge("reviewer", END)
 _review_graph_builder.set_entry_point("parser")
 
@@ -320,6 +337,10 @@ def get_qa_graph():
 def _make_initial_state(user_input: str = "") -> WorkflowState:
     return {
         "input": user_input,
+        "file_path": "",
+        "contract_name": "",
+        "clauses": [],
+        "clause_reviews": [],
         "contract_type": "",
         "branches": [],
         "branch_results": {},

@@ -27,6 +27,7 @@ from server.services.history_service import create_history
 from server.services import conversation_service as conv_svc
 from server.services import thread_cache
 from graph.reviewer import _stream_queues as _review_queues
+from graph.reduce_reviewer import _stream_queues as _reduce_queues
 from graph.qa_responder import _stream_queues as _qa_queues
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,9 @@ async def _stream_graph(
 
     for attempt in range(1, _STREAM_MAX_RETRIES + 1):
         token_queue: asyncio.Queue = asyncio.Queue()
+        # 注册到所有可能的流式节点（reviewer/qa/map_reduce 可能复用同一线程）
         _review_queues[thread_id] = token_queue
+        _reduce_queues[thread_id] = token_queue
         _qa_queues[thread_id] = token_queue
         graph_error = None
         astream_ended = asyncio.Event()
@@ -99,6 +102,18 @@ async def _stream_graph(
                             "_dispatcher": True,
                             "contract_type": d_data.get("contract_type", ""),
                             "branches": d_data.get("branches", []),
+                        })
+                    if mode == "updates" and "map_reviewer" in data:
+                        m_data = data["map_reviewer"]
+                        await token_queue.put({
+                            "_map_done": True,
+                            "clause_reviews": m_data.get("clause_reviews", []),
+                        })
+                    if mode == "updates" and "reduce_reviewer" in data:
+                        r_data = data["reduce_reviewer"]
+                        await token_queue.put({
+                            "_review_done": True,
+                            "review_output": r_data.get("review_output", ""),
                         })
                     if mode == "updates" and "reviewer" in data:
                         r_data = data["reviewer"]
@@ -145,6 +160,13 @@ async def _stream_graph(
                             "warnings": item.get("warnings", []),
                         },
                     }
+                elif "_map_progress" in item:
+                    yield {"event": "map_progress", "data": item["_map_progress"]}
+                elif "_map_done" in item:
+                    yield {
+                        "event": "map_done",
+                        "data": {"clause_count": len(item.get("clause_reviews", []))},
+                    }
                 elif "_review_done" in item:
                     review_output = item.get("review_output", "")
                     if item.get("error"):
@@ -154,6 +176,7 @@ async def _stream_graph(
 
             await graph_task
             _review_queues.pop(thread_id, None)
+            _reduce_queues.pop(thread_id, None)
             _qa_queues.pop(thread_id, None)
 
             if graph_error and attempt < _STREAM_MAX_RETRIES:
@@ -193,6 +216,7 @@ async def _stream_graph(
 
         except Exception as e:
             _review_queues.pop(thread_id, None)
+            _reduce_queues.pop(thread_id, None)
             _qa_queues.pop(thread_id, None)
             if attempt == _STREAM_MAX_RETRIES:
                 logger.error(f"图流式 {_STREAM_MAX_RETRIES} 次全部失败 (thread={thread_id}): {e}")
@@ -249,8 +273,18 @@ async def stream_review(
             yield event
         elif event["event"] == "done":
             error_msg = event["data"].get("error", "")
+
+            # 兜底：检查 state 快照中的 error（Command(goto=END, {"error": ...}) 场景）
+            if not error_msg:
+                snapshot = await get_review_graph().aget_state(config)
+                if snapshot and snapshot.values:
+                    error_msg = snapshot.values.get("error", "")
+
             if error_msg:
-                yield event
+                yield {
+                    "event": "done",
+                    "data": {"id": None, "thread_id": actual_thread_id, "full_output": "", "error": error_msg},
+                }
                 return
 
             snapshot = await get_review_graph().aget_state(config)
@@ -258,6 +292,7 @@ async def stream_review(
             contract_type = sv.get("contract_type", retrieval_info.get("contract_type", ""))
             branches = sv.get("branches", retrieval_info.get("branches", []))
             if not full_text:
+                # review_output 可能来自 reviewer（单次审查）或 reduce_reviewer（逐条审查汇总）
                 full_text = sv.get("review_output", "")
 
             history_id = None
@@ -330,12 +365,26 @@ async def stream_qa(
             yield event
         elif event["event"] == "done":
             error_msg = event["data"].get("error", "")
+
+            # 兜底：检查 state 快照中的 error
+            if not error_msg:
+                snapshot = await get_qa_graph().aget_state(config)
+                if snapshot and snapshot.values:
+                    error_msg = snapshot.values.get("error", "")
+
             if error_msg:
-                yield event
+                yield {
+                    "event": "done",
+                    "data": {"id": None, "thread_id": actual_thread_id, "full_output": "", "error": error_msg},
+                }
                 return
 
             snapshot = await get_qa_graph().aget_state(config)
             sv = snapshot.values if snapshot else {}
+            contract_type = sv.get("contract_type", retrieval_info.get("contract_type", ""))
+            branches = sv.get("branches", retrieval_info.get("branches", []))
+            if not full_text:
+                full_text = sv.get("review_output", "")
             contract_type = sv.get("contract_type", retrieval_info.get("contract_type", ""))
             branches = sv.get("branches", retrieval_info.get("branches", []))
             if not full_text:
